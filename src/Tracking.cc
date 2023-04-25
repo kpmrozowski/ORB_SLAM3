@@ -1633,8 +1633,10 @@ void Tracking::PreintegrateIMU()
 
     mvImuFromLastFrame.clear();
     mvImuFromLastFrame.reserve(mlQueueImuData.size());
-    if(mlQueueImuData.size() == 0)
+    printf("dbg mlQueueImuData.size=%zu; ", mlQueueImuData.size());
+    if(mlQueueImuData.empty())
     {
+        printf("mlQueueImuData is empty 1");
         Verbose::PrintMess("Not IMU data in mlQueueImuData!!", Verbose::VERBOSITY_NORMAL);
         mCurrentFrame.setIntegrated();
         return;
@@ -1645,27 +1647,33 @@ void Tracking::PreintegrateIMU()
         bool bSleep = false;
         {
             unique_lock<mutex> lock(mMutexImuQueue);
+            printf("PrevFrame->ts=%0.3f, Frame->ts=%0.3f, mImuPer=%0.6f; ",
+                mCurrentFrame.mpPrevFrame->mTimeStamp, mCurrentFrame.mTimeStamp, mImuPer);
             if(!mlQueueImuData.empty())
             {
                 IMU::Point* m = &mlQueueImuData.front();
                 cout.precision(17);
                 if(m->t<mCurrentFrame.mpPrevFrame->mTimeStamp-mImuPer)
                 {
+                    printf("to early ts=%0.3f; ", m->t);
                     mlQueueImuData.pop_front();
                 }
                 else if(m->t<mCurrentFrame.mTimeStamp-mImuPer)
                 {
+                    printf("on time ts=%0.3f; ", m->t);
                     mvImuFromLastFrame.push_back(*m);
                     mlQueueImuData.pop_front();
                 }
                 else
                 {
+                    printf("to late ts=%0.3f; ", m->t);
                     mvImuFromLastFrame.push_back(*m);
                     break;
                 }
             }
             else
             {
+                printf("mlQueueImuData is empty 2; ");
                 break;
                 bSleep = true;
             }

@@ -337,6 +337,16 @@ namespace ORB_SLAM3 {
         if(cameraType_ == Rectified){
             b_ = readParameter<float>(fSettings,"Stereo.b",found);
             bf_ = b_ * calibration1_->getParameter(0);
+
+            //Read intrinsic parameters
+            float fx = readParameter<float>(fSettings,"Camera2.fx",found);
+            float fy = readParameter<float>(fSettings,"Camera2.fy",found);
+            float cx = readParameter<float>(fSettings,"Camera2.cx",found);
+            float cy = readParameter<float>(fSettings,"Camera2.cy",found);
+
+            vCalibration = {fx, fy, cx, cy};
+            calibration2_ = new Pinhole(vCalibration);
+            originalCalib2_ = new Pinhole(vCalibration);
         }
         else{
             cv::Mat cvTlr = readParameter<cv::Mat>(fSettings,"Stereo.T_c1_c2",found);
@@ -490,7 +500,9 @@ namespace ORB_SLAM3 {
         K2.convertTo(K2,CV_64F);
 
         cv::Mat cvTlr;
-        cv::eigen2cv(Tlr_.inverse().matrix3x4(),cvTlr);
+        cv::eigen2cv(Tlr_.matrix3x4(), cvTlr);
+        std::cout << cvTlr;
+        // cv::eigen2cv(Tlr_.inverse().matrix3x4(),cvTlr);
         cv::Mat R12 = cvTlr.rowRange(0,3).colRange(0,3);
         R12.convertTo(R12,CV_64F);
         cv::Mat t12 = cvTlr.rowRange(0,3).col(3);
@@ -575,6 +587,8 @@ namespace ORB_SLAM3 {
 
         output << "\t-Original image size: [ " << settings.originalImSize_.width << " , " << settings.originalImSize_.height << " ]" << endl;
         output << "\t-Current image size: [ " << settings.newImSize_.width << " , " << settings.newImSize_.height << " ]" << endl;
+
+        output << "\t-T_c1_c2: [ " << Converter::toCvMat(settings.Tlr_.matrix3x4()) << " ]" << endl;
 
         if(settings.bNeedToRectify_){
             output << "\t-Camera 1 parameters after rectification: [ ";

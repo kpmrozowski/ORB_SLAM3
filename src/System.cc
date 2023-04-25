@@ -568,7 +568,7 @@ bool System::isShutDown() {
 
 void System::SaveTrajectoryTUM(const string &filename)
 {
-    cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
+    // cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
     if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryTUM cannot be used for monocular." << endl;
@@ -576,6 +576,10 @@ void System::SaveTrajectoryTUM(const string &filename)
     }
 
     vector<KeyFrame*> vpKFs = mpAtlas->GetAllKeyFrames();
+    if (vpKFs.empty()) {
+        cout << "Map " << mpAtlas->GetCurrentMap()->GetId() << " has 0 KeyFrames" << endl;
+        return;
+    }
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
 
     // Transform all keyframes so that the first keyframe is at the origin.
@@ -620,15 +624,15 @@ void System::SaveTrajectoryTUM(const string &filename)
         Eigen::Vector3f twc = Twc.translation();
         Eigen::Quaternionf q = Twc.unit_quaternion();
 
-        f << setprecision(6) << *lT << " " <<  setprecision(9) << twc(0) << " " << twc(1) << " " << twc(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+        f << setprecision(3) << *lT << " " <<  setprecision(9) << twc(0) << " " << twc(1) << " " << twc(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
     }
     f.close();
-    // cout << endl << "trajectory saved!" << endl;
+    // cout << endl << "End of saving camera trajectory to " << filename << endl;
 }
 
 void System::SaveKeyFrameTrajectoryTUM(const string &filename)
 {
-    cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
+    // cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
 
     vector<KeyFrame*> vpKFs = mpAtlas->GetAllKeyFrames();
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
@@ -639,6 +643,7 @@ void System::SaveKeyFrameTrajectoryTUM(const string &filename)
     f.open(filename.c_str());
     f << fixed;
 
+    f << "timestamp,tx,ty,tz,qx,qy,qz,qw" << endl;
     for(size_t i=0; i<vpKFs.size(); i++)
     {
         KeyFrame* pKF = vpKFs[i];
@@ -651,18 +656,19 @@ void System::SaveKeyFrameTrajectoryTUM(const string &filename)
         Sophus::SE3f Twc = pKF->GetPoseInverse();
         Eigen::Quaternionf q = Twc.unit_quaternion();
         Eigen::Vector3f t = Twc.translation();
-        f << setprecision(6) << pKF->mTimeStamp << setprecision(7) << " " << t(0) << " " << t(1) << " " << t(2)
-          << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+        f << setprecision(3) << pKF->mTimeStamp << setprecision(9) << "," << t(0) << "," << t(1) << "," << t(2)
+          << "," << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << endl;
 
     }
 
     f.close();
+    // cout << "End of saving camera trajectory to " << filename << endl;
 }
 
 void System::SaveTrajectoryEuRoC(const string &filename)
 {
 
-    cout << endl << "Saving trajectory to " << filename << " ..." << endl;
+    // cout << endl << "Saving trajectory to " << filename << " ..." << endl;
     /*if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryEuRoC cannot be used for monocular." << endl;
@@ -675,7 +681,7 @@ void System::SaveTrajectoryEuRoC(const string &filename)
     std::cout << "There are " << std::to_string(vpMaps.size()) << " maps in the atlas" << std::endl;
     for(Map* pMap :vpMaps)
     {
-        std::cout << "  Map " << std::to_string(pMap->GetId()) << " has " << std::to_string(pMap->GetAllKeyFrames().size()) << " KFs" << std::endl;
+        std::cout << "  Map " << std::to_string(pMap->GetId()) << " has " << std::to_string(pMap->GetAllKeyFrames().size()) << " KFs" << "and is" << (pMap->IsBad() ? "Bad" : "Good") << std::endl;
         if(pMap->GetAllKeyFrames().size() > numMaxKFs)
         {
             numMaxKFs = pMap->GetAllKeyFrames().size();
@@ -684,6 +690,10 @@ void System::SaveTrajectoryEuRoC(const string &filename)
     }
 
     vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
+    if (vpKFs.empty()) {
+        cout << "Map " << pBiggerMap->GetId() << " has 0 KeyFrames" << endl;
+        return;
+    }
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
 
     // Transform all keyframes so that the first keyframe is at the origin.
@@ -698,6 +708,7 @@ void System::SaveTrajectoryEuRoC(const string &filename)
     f.open(filename.c_str());
     // cout << "file open" << endl;
     f << fixed;
+    f << "timestamp,tx,ty,tz,qx,qy,qz,qw" << endl;
 
     // Frame pose is stored relative to its reference keyframe (which is optimized by BA and pose graph).
     // We need to get first the keyframe pose and then concatenate the relative transformation.
@@ -759,36 +770,42 @@ void System::SaveTrajectoryEuRoC(const string &filename)
             Sophus::SE3f Twb = (pKF->mImuCalib.mTbc * (*lit) * Trw).inverse();
             Eigen::Quaternionf q = Twb.unit_quaternion();
             Eigen::Vector3f twb = Twb.translation();
-            f << setprecision(6) << 1e9*(*lT) << " " <<  setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(3) << *lT << "," <<  setprecision(9) << twb(0) << "," << twb(1) << "," << twb(2) << "," << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << endl;
         }
         else
         {
             Sophus::SE3f Twc = ((*lit)*Trw).inverse();
             Eigen::Quaternionf q = Twc.unit_quaternion();
             Eigen::Vector3f twc = Twc.translation();
-            f << setprecision(6) << 1e9*(*lT) << " " <<  setprecision(9) << twc(0) << " " << twc(1) << " " << twc(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(3) << *lT << "," <<  setprecision(9) << twc(0) << "," << twc(1) << "," << twc(2) << "," << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << endl;
         }
 
         // cout << "5" << endl;
     }
-    //cout << "end saving trajectory" << endl;
     f.close();
-    cout << endl << "End of saving trajectory to " << filename << " ..." << endl;
+    // cout << "End of saving trajectory to " << filename << endl;
 }
 
 void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
 {
 
-    cout << endl << "Saving trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
+    // cout << endl << "Saving trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
     /*if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryEuRoC cannot be used for monocular." << endl;
         return;
     }*/
-
-    int numMaxKFs = 0;
+    vector<Map*> vpMaps = mpAtlas->GetAllMaps();
+    for(Map* pMap :vpMaps)
+    {
+        std::cout << "  Map " << std::to_string(pMap->GetId()) << " has " << std::to_string(pMap->GetAllKeyFrames().size()) << " KFs" << "and is" << (pMap->IsBad() ? "Bad" : "Good") << std::endl;
+    }
 
     vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
+    if (vpKFs.empty()) {
+        cout << "Map " << pMap->GetId() << " has 0 KeyFrames" << endl;
+        return;
+    }
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
 
     // Transform all keyframes so that the first keyframe is at the origin.
@@ -803,6 +820,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
     f.open(filename.c_str());
     // cout << "file open" << endl;
     f << fixed;
+    f << "timestamp,tx,ty,tz,qx,qy,qz,qw" << endl;
 
     // Frame pose is stored relative to its reference keyframe (which is optimized by BA and pose graph).
     // We need to get first the keyframe pose and then concatenate the relative transformation.
@@ -864,21 +882,20 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
             Sophus::SE3f Twb = (pKF->mImuCalib.mTbc * (*lit) * Trw).inverse();
             Eigen::Quaternionf q = Twb.unit_quaternion();
             Eigen::Vector3f twb = Twb.translation();
-            f << setprecision(6) << 1e9*(*lT) << " " <<  setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(3) << *lT << "," <<  setprecision(9) << twb(0) << "," << twb(1) << "," << twb(2) << "," << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << endl;
         }
         else
         {
             Sophus::SE3f Twc = ((*lit)*Trw).inverse();
             Eigen::Quaternionf q = Twc.unit_quaternion();
             Eigen::Vector3f twc = Twc.translation();
-            f << setprecision(6) << 1e9*(*lT) << " " <<  setprecision(9) << twc(0) << " " << twc(1) << " " << twc(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(3) << *lT << "," <<  setprecision(9) << twc(0) << "," << twc(1) << "," << twc(2) << "," << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << endl;
         }
 
         // cout << "5" << endl;
     }
-    //cout << "end saving trajectory" << endl;
     f.close();
-    cout << endl << "End of saving trajectory to " << filename << " ..." << endl;
+    // cout << "End of saving trajectory to " << filename << endl;
 }
 
 /*void System::SaveTrajectoryEuRoC(const string &filename)
@@ -982,7 +999,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
 
             Eigen::Vector3f twb = Twb.translation();
             Eigen::Quaternionf q = Twb.unit_quaternion();
-            f << setprecision(6) << 1e9*(*lT) << " " <<  setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(6) << *lT) << " " <<  setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
         }
         else
         {
@@ -991,7 +1008,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
 
             Eigen::Vector3f twc = Twc.translation();
             Eigen::Quaternionf q = Twc.unit_quaternion();
-            f << setprecision(6) << 1e9*(*lT) << " " <<  setprecision(9) << twc(0) << " " << twc(1) << " " << twc(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(6) << *lT << " " <<  setprecision(9) << twc(0) << " " << twc(1) << " " << twc(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
         }
 
         // cout << "5" << endl;
@@ -1040,7 +1057,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
             cv::Mat R = pKF->GetImuRotation().t();
             vector<float> q = Converter::toQuaternion(R);
             cv::Mat twb = pKF->GetImuPosition();
-            f << setprecision(6) << 1e9*pKF->mTimeStamp  << " " <<  setprecision(9) << twb.at<float>(0) << " " << twb.at<float>(1) << " " << twb.at<float>(2) << " " << q[0] << " " << q[1] << " " << q[2] << " " << q[3] << endl;
+            f << setprecision(6) << pKF->mTimeStamp  << " " <<  setprecision(9) << twb.at<float>(0) << " " << twb.at<float>(1) << " " << twb.at<float>(2) << " " << q[0] << " " << q[1] << " " << q[2] << " " << q[3] << endl;
 
         }
         else
@@ -1048,7 +1065,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
             cv::Mat R = pKF->GetRotation();
             vector<float> q = Converter::toQuaternion(R);
             cv::Mat t = pKF->GetCameraCenter();
-            f << setprecision(6) << 1e9*pKF->mTimeStamp << " " <<  setprecision(9) << t.at<float>(0) << " " << t.at<float>(1) << " " << t.at<float>(2) << " " << q[0] << " " << q[1] << " " << q[2] << " " << q[3] << endl;
+            f << setprecision(6) << pKF->mTimeStamp << " " <<  setprecision(9) << t.at<float>(0) << " " << t.at<float>(1) << " " << t.at<float>(2) << " " << q[0] << " " << q[1] << " " << q[2] << " " << q[3] << endl;
         }
     }
     f.close();
@@ -1056,7 +1073,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
 
 void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
 {
-    cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
+    // cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
     Map* pBiggerMap;
@@ -1077,6 +1094,10 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
     }
 
     vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
+    if (vpKFs.empty()) {
+        cout << "Map " << pBiggerMap->GetId() << " has 0 KeyFrames" << endl;
+        return;
+    }
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
 
     // Transform all keyframes so that the first keyframe is at the origin.
@@ -1085,6 +1106,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
     f.open(filename.c_str());
     f << fixed;
 
+    f << "timestamp,tx,ty,tz,qx,qy,qz,qw" << endl;
     for(size_t i=0; i<vpKFs.size(); i++)
     {
         KeyFrame* pKF = vpKFs[i];
@@ -1098,7 +1120,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
             Sophus::SE3f Twb = pKF->GetImuPose();
             Eigen::Quaternionf q = Twb.unit_quaternion();
             Eigen::Vector3f twb = Twb.translation();
-            f << setprecision(6) << 1e9*pKF->mTimeStamp  << " " <<  setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(6) << pKF->mTimeStamp  << "," <<  setprecision(9) << twb(0) << "," << twb(1) << "," << twb(2) << "," << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << endl;
 
         }
         else
@@ -1106,17 +1128,22 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
             Sophus::SE3f Twc = pKF->GetPoseInverse();
             Eigen::Quaternionf q = Twc.unit_quaternion();
             Eigen::Vector3f t = Twc.translation();
-            f << setprecision(6) << 1e9*pKF->mTimeStamp << " " <<  setprecision(9) << t(0) << " " << t(1) << " " << t(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(6) << pKF->mTimeStamp << "," <<  setprecision(9) << t(0) << "," << t(1) << "," << t(2) << "," << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << endl;
         }
     }
     f.close();
+    // cout << "End of saving trajectory to " << filename << endl;
 }
 
 void System::SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap)
 {
-    cout << endl << "Saving keyframe trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
+    // cout << endl << "Saving keyframe trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
 
     vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
+    if (vpKFs.empty()) {
+        cout << "Map " << pMap->GetId() << " has 0 KeyFrames" << endl;
+        return;
+    }
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
 
     // Transform all keyframes so that the first keyframe is at the origin.
@@ -1125,6 +1152,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap)
     f.open(filename.c_str());
     f << fixed;
 
+    f << "timestamp,tx,ty,tz,qx,qy,qz,qw" << endl;
     for(size_t i=0; i<vpKFs.size(); i++)
     {
         KeyFrame* pKF = vpKFs[i];
@@ -1136,7 +1164,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap)
             Sophus::SE3f Twb = pKF->GetImuPose();
             Eigen::Quaternionf q = Twb.unit_quaternion();
             Eigen::Vector3f twb = Twb.translation();
-            f << setprecision(6) << 1e9*pKF->mTimeStamp  << " " <<  setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(6) << pKF->mTimeStamp  << "," <<  setprecision(9) << twb(0) << "," << twb(1) << "," << twb(2) << "," << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << endl;
 
         }
         else
@@ -1144,10 +1172,11 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap)
             Sophus::SE3f Twc = pKF->GetPoseInverse();
             Eigen::Quaternionf q = Twc.unit_quaternion();
             Eigen::Vector3f t = Twc.translation();
-            f << setprecision(6) << 1e9*pKF->mTimeStamp << " " <<  setprecision(9) << t(0) << " " << t(1) << " " << t(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(6) << pKF->mTimeStamp << "," <<  setprecision(9) << t(0) << "," << t(1) << "," << t(2) << "," << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << endl;
         }
     }
     f.close();
+    // cout << "End of saving trajectory to " << filename << endl;
 }
 
 /*void System::SaveTrajectoryKITTI(const string &filename)
@@ -1205,7 +1234,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap)
 
 void System::SaveTrajectoryKITTI(const string &filename)
 {
-    cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
+    // cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
     if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryKITTI cannot be used for monocular." << endl;
@@ -1213,6 +1242,10 @@ void System::SaveTrajectoryKITTI(const string &filename)
     }
 
     vector<KeyFrame*> vpKFs = mpAtlas->GetAllKeyFrames();
+    if (vpKFs.empty()) {
+        cout << "Map " << mpAtlas->GetCurrentMap()->GetId() << " has 0 KeyFrames" << endl;
+        return;
+    }
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
 
     // Transform all keyframes so that the first keyframe is at the origin.
@@ -1259,6 +1292,7 @@ void System::SaveTrajectoryKITTI(const string &filename)
              Rwc(2,0) << " " << Rwc(2,1)  << " " << Rwc(2,2) << " "  << twc(2) << endl;
     }
     f.close();
+    // cout << "End of saving trajectory to " << filename << endl;
 }
 
 
@@ -1336,6 +1370,11 @@ vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
     return mTrackedKeyPointsUn;
 }
 
+Atlas* System::GetAtlas()
+{
+    return mpAtlas;
+};
+
 double System::GetTimeFromIMUInit()
 {
     double aux = mpLocalMapper->GetCurrKFTime()-mpLocalMapper->mFirstTs;
@@ -1408,10 +1447,6 @@ void System::SaveAtlas(int type){
         // Save the current session
         mpAtlas->PreSave();
 
-        string pathSaveFileName = "./";
-        pathSaveFileName = pathSaveFileName.append(mStrSaveAtlasToFile);
-        pathSaveFileName = pathSaveFileName.append(".osa");
-
         string strVocabularyChecksum = CalculateCheckSum(mStrVocabularyFilePath,TEXT_FILE);
         std::size_t found = mStrVocabularyFilePath.find_last_of("/\\");
         string strVocabularyName = mStrVocabularyFilePath.substr(found+1);
@@ -1419,6 +1454,7 @@ void System::SaveAtlas(int type){
         if(type == TEXT_FILE) // File text
         {
             cout << "Starting to write the save text file " << endl;
+            string pathSaveFileName = mStrSaveAtlasToFile + "_text.osa";
             std::remove(pathSaveFileName.c_str());
             std::ofstream ofs(pathSaveFileName, std::ios::binary);
             boost::archive::text_oarchive oa(ofs);
@@ -1431,6 +1467,7 @@ void System::SaveAtlas(int type){
         else if(type == BINARY_FILE) // File binary
         {
             cout << "Starting to write the save binary file" << endl;
+            string pathSaveFileName = mStrSaveAtlasToFile + "_binary.osa";
             std::remove(pathSaveFileName.c_str());
             std::ofstream ofs(pathSaveFileName, std::ios::binary);
             boost::archive::binary_oarchive oa(ofs);

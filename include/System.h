@@ -22,11 +22,11 @@
 
 
 #include <unistd.h>
-#include<stdio.h>
-#include<stdlib.h>
-#include<string>
-#include<thread>
-#include<opencv2/core/core.hpp>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <thread>
+#include <opencv2/core/core.hpp>
 
 #include "Tracking.h"
 #include "FrameDrawer.h"
@@ -159,7 +159,7 @@ public:
     void SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap);
 
     // Save data used for initialization debug
-    void SaveDebugData(const int &iniIdx);
+    void SaveDebugData(const int &initIdx);
 
     // Save camera trajectory in the KITTI dataset format.
     // Only for stereo and RGB-D. This method does not work for monocular.
@@ -176,6 +176,7 @@ public:
     int GetTrackingState();
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+    Atlas* GetAtlas();
 
     // For debugging
     double GetTimeFromIMUInit();
@@ -192,10 +193,10 @@ public:
     void InsertTrackTime(double& time);
 #endif
 
-private:
-
     void SaveAtlas(int type);
     bool LoadAtlas(int type);
+
+private:
 
     string CalculateCheckSum(string filename, int type);
 
