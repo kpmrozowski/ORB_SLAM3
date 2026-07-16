@@ -51,6 +51,16 @@ static int PrCoincidences()
     static const int value = getenv("ORB_PR_COINC") ? atoi(getenv("ORB_PR_COINC")) : 3;
     return value;
 }
+// Sim3-RANSAC minimum inliers (env ORB_PR_SIM3_MININL). The solver only builds a 3D-3D
+// correspondence from a BoW match when the current keyframe ALSO has its own map point at the
+// matched keypoint — measured N on these flights is 4-15 (median ~8) out of 100+ BoW matches,
+// so the stock minimum (15, or MATCH_SCALE-scaled) aborts RANSAC before a single iteration.
+static int PrSim3MinInliers(const int fallback)
+{
+    static const int value =
+        getenv("ORB_PR_SIM3_MININL") ? atoi(getenv("ORB_PR_SIM3_MININL")) : 0;
+    return value > 0 ? value : fallback;
+}
 static int PrScaled(const int stockThreshold)
 {
     static const float scale =
@@ -745,7 +755,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 bFixedScale=false;
 
             Sim3Solver solver = Sim3Solver(mpCurrentKF, pMostBoWMatchesKF, vpMatchedPoints, bFixedScale, vpKeyFrameMatchedMP);
-            solver.SetRansacParameters(0.99, nBoWInliers, 300); // at least 15 inliers
+            solver.SetRansacParameters(0.99, PrSim3MinInliers(nBoWInliers), 300);
 
             bool bNoMore = false;
             vector<bool> vbInliers;
