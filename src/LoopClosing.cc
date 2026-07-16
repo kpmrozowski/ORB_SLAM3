@@ -753,6 +753,16 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
             bool bFixedScale = mbFixScale;
             if(mpTracker->mSensor==System::IMU_MONOCULAR && !mpCurrentKF->GetMap()->GetIniertialBA2())
                 bFixedScale=false;
+            // ORB_PR_FREE_SCALE: let Sim3 RANSAC estimate scale even post-VIBA2. Monocular
+            // horizontal scale drifts along the flight, so takeoff-region and landing-region
+            // geometry disagree in scale and a FIXED-scale hypothesis fits no true match set
+            // (measured: bestInliers 0-1 at N up to 23 on genuine revisit candidates). The
+            // accept-time 4-DoF lock discards the estimated scale anyway (yaw+translation only).
+            static const bool prFreeScale = getenv("ORB_PR_FREE_SCALE") != nullptr;
+            if (prFreeScale)
+            {
+                bFixedScale = false;
+            }
 
             Sim3Solver solver = Sim3Solver(mpCurrentKF, pMostBoWMatchesKF, vpMatchedPoints, bFixedScale, vpKeyFrameMatchedMP);
             solver.SetRansacParameters(0.99, PrSim3MinInliers(nBoWInliers), 300);
@@ -773,7 +783,8 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 std::cout << "PRDBG     sim3 converge=" << bConverge << " inliers=" << nInliers
                           << " N=" << solver.GetNumCorrespondences()
                           << " bestInl=" << solver.GetBestInliers()
-                          << " fixScale=" << bFixedScale << std::endl;
+                          << " fixScale=" << bFixedScale
+                          << " scale=" << solver.GetEstimatedScale() << std::endl;
             }
             if(bConverge)
             {
