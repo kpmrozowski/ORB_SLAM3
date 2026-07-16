@@ -534,6 +534,15 @@ bool LoopClosing::NewDetectCommonRegions()
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartEstSim3_2 = std::chrono::steady_clock::now();
 #endif
+    // Place-recognition cascade debug (env ORB_PR_DEBUG): where do candidates die?
+    static const bool prDebug = getenv("ORB_PR_DEBUG") != nullptr;
+    if (prDebug && (!vpLoopBowCand.empty() || !vpMergeBowCand.empty()))
+    {
+        std::cout << "PRDBG KF" << mpCurrentKF->mnId << " t=" << mpCurrentKF->mTimeStamp
+                  << " loopCand=" << vpLoopBowCand.size()
+                  << " mergeCand=" << vpMergeBowCand.size() << std::endl;
+    }
+
     // Check the BoW candidates if the geometric candidate list is empty
     //Loop candidates
     if(!bLoopDetectedInKF && !vpLoopBowCand.empty())
@@ -722,6 +731,12 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
 
         //pMostBoWMatchesKF = vpCovKFi[pMostBoWMatchesKF];
 
+        static const bool prDebugBow = getenv("ORB_PR_DEBUG") != nullptr;
+        if (prDebugBow)
+        {
+            std::cout << "PRDBG   cand KF" << pKFi->mnId << " bowMatches=" << numBoWMatches
+                      << " (need " << nBoWMatches << ")" << std::endl;
+        }
         if(numBoWMatches >= nBoWMatches) // TODO pick a good threshold
         {
             // Geometric validation
@@ -743,6 +758,11 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 //Verbose::PrintMess("BoW guess: Solver achieve " + to_string(nInliers) + " geometrical inliers among " + to_string(nBoWInliers) + " BoW matches", Verbose::VERBOSITY_DEBUG);
             }
 
+            if (prDebugBow)
+            {
+                std::cout << "PRDBG     sim3 converge=" << bConverge << " inliers=" << nInliers
+                          << std::endl;
+            }
             if(bConverge)
             {
                 //std::cout << "Check BoW: SolverSim3 converged" << std::endl;
@@ -787,7 +807,11 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 vector<KeyFrame*> vpMatchedKF;
                 vpMatchedKF.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<KeyFrame*>(NULL));
                 int numProjMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpKeyFrames, vpMatchedMP, vpMatchedKF, 8, 1.5);
-                //cout <<"BoW: " << numProjMatches << " matches between " << vpMapPoints.size() << " points with coarse Sim3" << endl;
+                if (prDebugBow)
+                {
+                    std::cout << "PRDBG     projMatches=" << numProjMatches << " (need "
+                              << nProjMatches << ")" << std::endl;
+                }
 
                 if(numProjMatches >= nProjMatches)
                 {
