@@ -1463,22 +1463,26 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     std::chrono::steady_clock::time_point t4 = std::chrono::steady_clock::now();
     if (bFIBA)
     {
+        if (getenv("ORB_DET_DEBUG"))
+        {
+            double vsum = 0.0;
+            for (KeyFrame* pKFd : vpKF) { vsum += (double)pKFd->GetVelocity().sum(); }
+            printf("DETVEL preFIBA vsum=%.17g\n", vsum);
+        }
         if (priorA!=0.f)
-            if (getenv("ORB_DET_DEBUG"))
-            {
-                double vsum = 0.0;
-                for (KeyFrame* pKFd : vpKF) { vsum += (double)pKFd->GetVelocity().sum(); }
-                printf("DETVEL preFIBA vsum=%.17g\n", vsum);
-            }
+        {
             Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, true, priorG, priorA);
-            if (getenv("ORB_DET_DEBUG"))
-            {
-                double vsum = 0.0;
-                for (KeyFrame* pKFd : vpKF) { vsum += (double)pKFd->GetVelocity().sum(); }
-                printf("DETVEL postFIBA vsum=%.17g\n", vsum);
-            }
+        }
         else
+        {
             Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, false);
+        }
+        if (getenv("ORB_DET_DEBUG"))
+        {
+            double vsum = 0.0;
+            for (KeyFrame* pKFd : vpKF) { vsum += (double)pKFd->GetVelocity().sum(); }
+            printf("DETVEL postFIBA vsum=%.17g\n", vsum);
+        }
     }
 
     std::chrono::steady_clock::time_point t5 = std::chrono::steady_clock::now();
