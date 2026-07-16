@@ -782,6 +782,11 @@ namespace ORB_SLAM3
     {
         allKeypoints.resize(nlevels);
 
+        // Reset the per-frame FAST-detection diagnostics for this operator() call.
+        mInitThreshDetections = 0;
+        mUsedThreshDetections = 0;
+        mCellsFellBack = 0;
+
         const float W = 35;
 
         for (int level = 0; level < nlevels; ++level)
@@ -825,6 +830,8 @@ namespace ORB_SLAM3
 
                     FAST(mvImagePyramid[level].rowRange(iniY,maxY).colRange(iniX,maxX),
                          vKeysCell,iniThFAST,true);
+                    const int initialCellCount = static_cast<int>(vKeysCell.size());
+                    mInitThreshDetections += initialCellCount;
 
                     /*if(bRight && j <= 13){
                         FAST(mvImagePyramid[level].rowRange(iniY,maxY).colRange(iniX,maxX),
@@ -857,6 +864,15 @@ namespace ORB_SLAM3
                                  vKeysCell,minThFAST,true);
                         }*/
                     }
+
+                    // A cell empty at the initial threshold retried at minThFAST above, so it used
+                    // the lower threshold. Tally the corners obtained with the actually-used
+                    // threshold (initial where it produced any, min where it fell back).
+                    if(initialCellCount == 0)
+                    {
+                        mCellsFellBack++;
+                    }
+                    mUsedThreshDetections += static_cast<int>(vKeysCell.size());
 
                     if(!vKeysCell.empty())
                     {
@@ -1099,6 +1115,74 @@ namespace ORB_SLAM3
         vector < vector<KeyPoint> > allKeypoints;
         ComputeKeyPointsOctTree(allKeypoints);
         //ComputeKeyPointsOld(allKeypoints);
+
+        // --- circular detection mask (sky filter): keep keypoints inside a circle at the principal point,
+        //     diameter = ORB_MASK_FRAC * image height. Applied during extraction (before descriptors).
+        //     Keypoints are still in LEVEL coordinates here (scaled to level-0 later at "keypoint->pt *= scale"),
+        //     so multiply by the level scale to compare against the mask in level-0 pixels. ---
+        static const float maskFrac = getenv("ORB_MASK_FRAC") ? atof(getenv("ORB_MASK_FRAC")) : 0.0f;
+        if (maskFrac > 0.0f)
+        {
+            const float maskCx = getenv("ORB_MASK_CX") ? atof(getenv("ORB_MASK_CX")) : image.cols * 0.5f;
+            const float maskCy = getenv("ORB_MASK_CY") ? atof(getenv("ORB_MASK_CY")) : image.rows * 0.5f;
+            const float radius2 = powf(0.5f * maskFrac * image.rows, 2.0f);
+            for (int level = 0; level < nlevels; ++level)
+            {
+                const float levelScale = mvScaleFactor[level];
+                std::vector<cv::KeyPoint> kept;
+                kept.reserve(allKeypoints[level].size());
+                for (const cv::KeyPoint& keypoint : allKeypoints[level])
+                {
+                    const float dx = keypoint.pt.x * levelScale - maskCx;
+                    const float dy = keypoint.pt.y * levelScale - maskCy;
+                    if (dx * dx + dy * dy <= radius2)
+                    {
+                        kept.push_back(keypoint);
+                    }
+                }
+                allKeypoints[level].swap(kept);
+            }
+        }
+
+        // --- precomputed detection-mask image (ORB_MASK_FILE): a grayscale PNG in DISTORTED image
+        //     space (e.g. an undistorted-domain circle mapped back through the fisheye model by
+        //     eval/make_undist_circle_mask.py). Keypoints on zero pixels are rejected. Same
+        //     level-coordinate handling as the circular mask above. ---
+        static const char* const maskFilePath = getenv("ORB_MASK_FILE");
+        if (maskFilePath != nullptr)
+        {
+            static const cv::Mat maskImage = cv::imread(maskFilePath, cv::IMREAD_GRAYSCALE);
+            if (!maskImage.empty() && maskImage.rows == image.rows && maskImage.cols == image.cols)
+            {
+                for (int level = 0; level < nlevels; ++level)
+                {
+                    const float levelScale = mvScaleFactor[level];
+                    std::vector<cv::KeyPoint> kept;
+                    kept.reserve(allKeypoints[level].size());
+                    for (const cv::KeyPoint& keypoint : allKeypoints[level])
+                    {
+                        const int maskX = cvRound(keypoint.pt.x * levelScale);
+                        const int maskY = cvRound(keypoint.pt.y * levelScale);
+                        if (maskX >= 0 && maskX < maskImage.cols && maskY >= 0 &&
+                            maskY < maskImage.rows && maskImage.at<uchar>(maskY, maskX) > 0)
+                        {
+                            kept.push_back(keypoint);
+                        }
+                    }
+                    allKeypoints[level].swap(kept);
+                }
+            }
+            else
+            {
+                static bool warned = false;
+                if (!warned)
+                {
+                    warned = true;
+                    std::cout << "ORB_MASK_FILE: cannot load or size mismatch: " << maskFilePath
+                              << std::endl;
+                }
+            }
+        }
 
         Mat descriptors;
 

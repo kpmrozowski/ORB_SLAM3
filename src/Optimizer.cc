@@ -35,6 +35,8 @@
 #include "Thirdparty/g2o/g2o/core/robust_kernel_impl.h"
 #include "Thirdparty/g2o/g2o/solvers/linear_solver_dense.h"
 #include "G2oTypes.h"
+#include "BaroFusion.h"
+#include "MagFusion.h"
 #include "Converter.h"
 
 #include<mutex>
@@ -44,6 +46,241 @@
 
 namespace ORB_SLAM3
 {
+
+/** Gauge-safe barometric z edges for the given keyframes (see BaroFusion.h). The datum
+ *  (constant z<->baro offset) is taken from the NEWEST anchor keyframe (the fixed, already
+ *  accepted past) so the edges pull the optimizable window toward "anchor + baro increment" —
+ *  true drift suppression. Without anchors (full/init BA) it falls back to the median offset over
+ *  the window, which only enforces the vertical shape. Recomputed every call, so it survives
+ *  later ApplyScaledRotation/ScaleRefinement global similarity updates. */
+static void AddBaroEdges(g2o::SparseOptimizer& optimizer, const std::vector<KeyFrame*>& keyframes,
+                         const std::vector<KeyFrame*>& anchorKeyframes)
+{
+    BaroFusion& baro = BaroFusion::Instance();
+    std::vector<KeyFrame*> withBaro;
+    std::vector<double> baroAltitudes;
+    std::vector<double> offsets;
+    for (KeyFrame* pKFi : keyframes)
+    {
+        double altitude;
+        if (!pKFi || pKFi->isBad() || !baro.AltitudeAt(pKFi->mTimeStamp, altitude))
+        {
+            continue;
+        }
+        g2o::OptimizableGraph::Vertex* vertex =
+            dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId));
+        if (!vertex || vertex->fixed())
+        {
+            continue;
+        }
+        withBaro.push_back(pKFi);
+        baroAltitudes.push_back(altitude);
+        offsets.push_back(static_cast<double>(pKFi->GetImuPosition()(2)) - altitude);
+    }
+    if (withBaro.size() < 2)
+    {
+        return;
+    }
+    const KeyFrame* newestAnchor = nullptr;
+    double anchorDatum = 0.0;
+    for (KeyFrame* pKFi : anchorKeyframes)
+    {
+        double altitude;
+        if (!pKFi || pKFi->isBad() || !baro.AltitudeAt(pKFi->mTimeStamp, altitude))
+        {
+            continue;
+        }
+        if (!newestAnchor || pKFi->mTimeStamp > newestAnchor->mTimeStamp)
+        {
+            newestAnchor = pKFi;
+            anchorDatum = static_cast<double>(pKFi->GetImuPosition()(2)) - altitude;
+        }
+    }
+    // Datum: newest fixed anchor (accepted past) > window median. NOTE a stored absolute per-map
+    // datum was tried and REJECTED: it made the edges fight structurally mis-scaled monocular
+    // geometry until the map exploded (flight 538, kilometre-scale divergence). The vertical
+    // SCALE is instead maintained by the periodic baro ScaleRefinement (ORB_BARO_SCALEREF_S).
+    const double datum = newestAnchor ? anchorDatum : BaroFusion::WindowDatum(offsets);
+    const double invSigma2 = 1.0 / (baro.Sigma() * baro.Sigma());
+    static const bool debugBaro = getenv("ORB_BARO_DEBUG") != nullptr;
+    if (debugBaro)
+    {
+        double meanAbsResidual = 0.0;
+        for (size_t i = 0; i < withBaro.size(); i++)
+        {
+            meanAbsResidual += std::abs(offsets[i] - datum);
+        }
+        std::cout << "AddBaroEdges: " << withBaro.size() << " KFs, datum " << datum
+                  << (newestAnchor ? " (anchor)" : " (median)")
+                  << ", mean|resid| " << meanAbsResidual / withBaro.size() << std::endl;
+    }
+    // The barometer is outlier-free, so the edges are QUADRATIC (no robust kernel): a Huber kernel
+    // saturates on the multi-metre residuals of a vertically mis-scaled map and can never repair
+    // it (observed: v-scale stuck at 0.4 on flight 538). Bogus constraints are prevented by an
+    // insertion gate instead: a keyframe whose current inconsistency exceeds ORB_BARO_GATE metres
+    // (default 15) indicates relocalization/datum breakage, not drift — no edge is added for it.
+    for (size_t i = 0; i < withBaro.size(); i++)
+    {
+        const double residualNow =
+            (static_cast<double>(withBaro[i]->GetImuPosition()(2)) - baroAltitudes[i]) - datum;
+        if (std::abs(residualNow) > baro.Gate())
+        {
+            continue;
+        }
+        EdgeBaroZ* edgeBaro = new EdgeBaroZ();
+        edgeBaro->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(
+                                   optimizer.vertex(withBaro[i]->mnId)));
+        edgeBaro->setMeasurement(baroAltitudes[i] + datum);
+        edgeBaro->setInformation(Eigen::Matrix<double, 1, 1>::Identity() * invSigma2);
+        optimizer.addEdge(edgeBaro);
+    }
+}
+
+/** Baro vertical-scale edges for the IMU-initialization optimizations (see EdgeBaroScaleGDir):
+ *  constrain scale * up^T(p_i - p_ref) to the baro altitude difference. Poses are fixed there, so
+ *  only (Rwg, scale) absorb the constraint — the map is born with a metric vertical channel. */
+static void AddBaroScaleEdges(g2o::SparseOptimizer& optimizer, const std::vector<KeyFrame*>& vpKFs,
+                              const unsigned long maxKFid, VertexGDir* vertexGDir,
+                              VertexScale* vertexScale)
+{
+    BaroFusion& baro = BaroFusion::Instance();
+    if (!baro.Enabled())
+    {
+        return;
+    }
+    const double sigma = 2.0 * baro.Sigma();  // baro lags true altitude during dynamic climbs
+    const double invSigma2 = 1.0 / (sigma * sigma);
+    bool haveReference = false;
+    double referenceAltitude = 0.0;
+    Eigen::Vector3d referencePosition = Eigen::Vector3d::Zero();
+    int edgeCount = 0;
+    for (KeyFrame* pKFi : vpKFs)
+    {
+        double altitude;
+        if (!pKFi || pKFi->isBad() || pKFi->mnId > maxKFid ||
+            !baro.AltitudeAt(pKFi->mTimeStamp, altitude))
+        {
+            continue;
+        }
+        const Eigen::Vector3d position = pKFi->GetImuPosition().cast<double>();
+        if (!haveReference)
+        {
+            haveReference = true;
+            referenceAltitude = altitude;
+            referencePosition = position;
+            continue;
+        }
+        EdgeBaroScaleGDir* edgeBaro = new EdgeBaroScaleGDir(position - referencePosition);
+        edgeBaro->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(vertexGDir));
+        edgeBaro->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(vertexScale));
+        edgeBaro->setMeasurement(altitude - referenceAltitude);
+        edgeBaro->setInformation(Eigen::Matrix<double, 1, 1>::Identity() * invSigma2);
+        g2o::RobustKernelHuber* robustKernel = new g2o::RobustKernelHuber;
+        edgeBaro->setRobustKernel(robustKernel);
+        robustKernel->setDelta(2.0f);
+        optimizer.addEdge(edgeBaro);
+        edgeCount++;
+    }
+    if (edgeCount > 0)
+    {
+        std::cout << "BaroFusion: " << edgeCount << " init vertical-scale edges" << std::endl;
+    }
+}
+
+/** Median of azimuth angles, wraparound-safe: unwrap around the first sample, median, renormalize. */
+static double MedianAngle(std::vector<double> angles)
+{
+    const double base = angles.front();
+    for (double& angle : angles)
+    {
+        angle = base + NormalizeAngle(angle - base);
+    }
+    std::vector<double>::iterator middle = angles.begin() + angles.size() / 2;
+    std::nth_element(angles.begin(), middle, angles.end());
+    return NormalizeAngle(*middle);
+}
+
+/** Gauge-safe magnetometer yaw edges for the given keyframes (see MagFusion.h). The world yaw
+ *  reference (constant Earth-field azimuth) is taken from the NEWEST fixed anchor keyframe (the
+ *  accepted past) so the edges pull the optimizable window toward the anchor's heading — relative
+ *  yaw-drift suppression. Without anchors it falls back to the window median azimuth. Recomputed
+ *  every call, so it survives later ApplyScaledRotation global similarity updates. Edges whose
+ *  predicted world field is nearly vertical (yaw unobservable) or whose current residual already
+ *  exceeds 45 deg (relocalization/heading breakage, not drift) are skipped. No robust kernel. */
+static void AddMagYawEdges(g2o::SparseOptimizer& optimizer, const std::vector<KeyFrame*>& keyframes,
+                           const std::vector<KeyFrame*>& anchorKeyframes)
+{
+    MagFusion& mag = MagFusion::Instance();
+    std::vector<KeyFrame*> withMag;
+    std::vector<Eigen::Vector3d> fields;  // body-frame unit field per kept keyframe
+    std::vector<double> yaws;             // current world-frame azimuth per kept keyframe
+    for (KeyFrame* pKFi : keyframes)
+    {
+        Eigen::Vector3d fieldBody;
+        if (!pKFi || pKFi->isBad() || !mag.FieldAt(pKFi->mTimeStamp, fieldBody))
+        {
+            continue;
+        }
+        g2o::OptimizableGraph::Vertex* vertex =
+            dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId));
+        if (!vertex || vertex->fixed())
+        {
+            continue;
+        }
+        const Eigen::Vector3d fieldWorld = pKFi->GetImuRotation().cast<double>() * fieldBody;
+        if (std::hypot(fieldWorld.x(), fieldWorld.y()) < 0.2)  // nearly vertical -> yaw unobservable
+        {
+            continue;
+        }
+        withMag.push_back(pKFi);
+        fields.push_back(fieldBody);
+        yaws.push_back(std::atan2(fieldWorld.y(), fieldWorld.x()));
+    }
+    if (withMag.size() < 2)
+    {
+        return;
+    }
+    const KeyFrame* newestAnchor = nullptr;
+    double reference = 0.0;
+    for (KeyFrame* pKFi : anchorKeyframes)
+    {
+        Eigen::Vector3d fieldBody;
+        if (!pKFi || pKFi->isBad() || !mag.FieldAt(pKFi->mTimeStamp, fieldBody))
+        {
+            continue;
+        }
+        const Eigen::Vector3d fieldWorld = pKFi->GetImuRotation().cast<double>() * fieldBody;
+        if (std::hypot(fieldWorld.x(), fieldWorld.y()) < 0.2)
+        {
+            continue;
+        }
+        if (!newestAnchor || pKFi->mTimeStamp > newestAnchor->mTimeStamp)
+        {
+            newestAnchor = pKFi;
+            reference = std::atan2(fieldWorld.y(), fieldWorld.x());
+        }
+    }
+    if (!newestAnchor)
+    {
+        reference = MedianAngle(yaws);
+    }
+    const double invSigma2 = 1.0 / (mag.SigmaRad() * mag.SigmaRad());
+    const double gateRad = 45.0 * kMagPi / 180.0;
+    for (size_t i = 0; i < withMag.size(); i++)
+    {
+        if (std::abs(NormalizeAngle(yaws[i] - reference)) > gateRad)
+        {
+            continue;  // relocalization / heading breakage, not drift
+        }
+        EdgeMagYaw* edgeMag = new EdgeMagYaw(fields[i]);
+        edgeMag->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(
+                                  optimizer.vertex(withMag[i]->mnId)));
+        edgeMag->setMeasurement(reference);
+        edgeMag->setInformation(Eigen::Matrix<double, 1, 1>::Identity() * invSigma2);
+        optimizer.addEdge(edgeMag);
+    }
+}
+
 bool sortByVal(const pair<MapPoint*, int> &a, const pair<MapPoint*, int> &b)
 {
     return (a.second < b.second);
@@ -469,6 +706,39 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
     {
         if(nNonFixed<3)
             return;
+    }
+
+    // Barometric altitude edges (env ORB_BARO_CSV) on all included keyframes (no anchor: the
+    // datum falls back to the window median, i.e. global vertical-shape correction)
+    if (BaroFusion::Instance().Enabled() && pMap->isImuInitialized())
+    {
+        std::vector<KeyFrame*> vpBaroKFs;
+        for (KeyFrame* pKFi : vpKFs)
+        {
+            if (pKFi->mnId <= maxKFid)
+            {
+                vpBaroKFs.push_back(pKFi);
+            }
+        }
+        AddBaroEdges(optimizer, vpBaroKFs, std::vector<KeyFrame*>());
+    }
+
+    // Magnetometer yaw edges (env ORB_MAG_CSV) on all included keyframes (no anchor: the
+    // reference falls back to the window median azimuth, i.e. global heading-shape correction).
+    // Gated on GetIniertialBA2 (mature IMU init): strong yaw edges on the still-fragile coarse
+    // init corrupt short flights into a reset loop (flight 542), so they only engage once ORB's
+    // own VIBA2 milestone marks the map trustworthy.
+    if (MagFusion::Instance().Enabled() && pMap->isImuInitialized() && pMap->GetIniertialBA2())
+    {
+        std::vector<KeyFrame*> vpMagKFs;
+        for (KeyFrame* pKFi : vpKFs)
+        {
+            if (pKFi->mnId <= maxKFid)
+            {
+                vpMagKFs.push_back(pKFi);
+            }
+        }
+        AddMagYawEdges(optimizer, vpMagKFs, std::vector<KeyFrame*>());
     }
 
     // IMU links
@@ -2662,6 +2932,28 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
             cout << "ERROR building inertial edge" << endl;
     }
 
+    // Barometric altitude edges (env ORB_BARO_CSV) on the optimizable keyframes, anchored to the
+    // newest fixed keyframe (accepted past) so vertical drift is corrected, not re-centred away.
+    if (BaroFusion::Instance().Enabled() && pCurrentMap->isImuInitialized())
+    {
+        std::vector<KeyFrame*> vpBaroKFs(vpOptimizableKFs.begin(), vpOptimizableKFs.end());
+        vpBaroKFs.insert(vpBaroKFs.end(), lpOptVisKFs.begin(), lpOptVisKFs.end());
+        const std::vector<KeyFrame*> vpBaroAnchors(lFixedKeyFrames.begin(), lFixedKeyFrames.end());
+        AddBaroEdges(optimizer, vpBaroKFs, vpBaroAnchors);
+    }
+
+    // Magnetometer yaw edges (env ORB_MAG_CSV) on the optimizable keyframes, anchored to the
+    // newest fixed keyframe (accepted past) so yaw drift is corrected, not re-centred away.
+    // Gated on GetIniertialBA2 (mature IMU init) — see the FullInertialBA note above.
+    if (MagFusion::Instance().Enabled() && pCurrentMap->isImuInitialized() &&
+        pCurrentMap->GetIniertialBA2())
+    {
+        std::vector<KeyFrame*> vpMagKFs(vpOptimizableKFs.begin(), vpOptimizableKFs.end());
+        vpMagKFs.insert(vpMagKFs.end(), lpOptVisKFs.begin(), lpOptVisKFs.end());
+        const std::vector<KeyFrame*> vpMagAnchors(lFixedKeyFrames.begin(), lFixedKeyFrames.end());
+        AddMagYawEdges(optimizer, vpMagKFs, vpMagAnchors);
+    }
+
     // Set MapPoint vertices
     const int nExpectedSize = (N+lFixedKeyFrames.size())*lLocalMapPoints.size();
 
@@ -3175,6 +3467,9 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
         }
     }
 
+    // Barometric vertical-scale constraints (env ORB_BARO_CSV)
+    AddBaroScaleEdges(optimizer, vpKFs, maxKFid, VGDir, VS);
+
     // Compute error for different scales
     std::set<g2o::HyperGraph::Edge*> setEdges = optimizer.edges();
 
@@ -3481,6 +3776,9 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
             optimizer.addEdge(ei);
         }
     }
+
+    // Barometric vertical-scale constraints (env ORB_BARO_CSV)
+    AddBaroScaleEdges(optimizer, vpKFs, maxKFid, VGDir, VS);
 
     // Compute error for different scales
     optimizer.setVerbose(false);
@@ -4488,6 +4786,42 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
     pMap->IncreaseChangeIndex();
 }
 
+/** Frame-rate barometric z edge for the tracking-thread inertial pose optimizations (env
+ *  ORB_BARO_FRAME_SIGMA, metres; 0/unset = off, stock behaviour). The datum is the reference
+ *  vertex's current IMU z, so the edge constrains the frame-to-reference z change to the
+ *  barometric altitude change — causal, no absolute datum. Quadratic like the BA baro edges
+ *  (the barometer is outlier-free); a predicted residual beyond ORB_BARO_GATE means breakage,
+ *  not drift — no edge then. */
+static void AddFrameBaroEdge(g2o::SparseOptimizer& optimizer, VertexPose* vertexFrame,
+                             const double frameTimeSec, const double referenceTimeSec,
+                             const double referenceZ)
+{
+    static const double frameSigma =
+        getenv("ORB_BARO_FRAME_SIGMA") ? atof(getenv("ORB_BARO_FRAME_SIGMA")) : 0.0;
+    if (frameSigma <= 0.0 || !BaroFusion::Instance().Enabled())
+    {
+        return;
+    }
+    double baroFrame = 0.0;
+    double baroReference = 0.0;
+    if (!BaroFusion::Instance().AltitudeAt(frameTimeSec, baroFrame) ||
+        !BaroFusion::Instance().AltitudeAt(referenceTimeSec, baroReference))
+    {
+        return;
+    }
+    const double targetZ = referenceZ + (baroFrame - baroReference);
+    const double predictedResidual = vertexFrame->estimate().twb[2] - targetZ;
+    if (std::abs(predictedResidual) > BaroFusion::Instance().Gate())
+    {
+        return;
+    }
+    EdgeBaroZ* edgeBaro = new EdgeBaroZ();
+    edgeBaro->setVertex(0, vertexFrame);
+    edgeBaro->setMeasurement(targetZ);
+    edgeBaro->setInformation(Eigen::Matrix<double, 1, 1>::Identity() / (frameSigma * frameSigma));
+    optimizer.addEdge(edgeBaro);
+}
+
 int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit)
 {
     g2o::SparseOptimizer optimizer;
@@ -4692,6 +5026,9 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
     Eigen::Matrix3d InfoA = pFrame->mpImuPreintegrated->C.block<3,3>(12,12).cast<double>().inverse();
     ear->setInformation(InfoA);
     optimizer.addEdge(ear);
+
+    AddFrameBaroEdge(optimizer, VP, pFrame->mTimeStamp, pKF->mTimeStamp,
+                     static_cast<double>(pKF->GetImuPosition()(2)));
 
     // We perform 4 optimizations, after each optimization we classify observation as inlier/outlier
     // At the next optimization, outliers are not included, but at the end they can be classified as inliers again.
@@ -5078,6 +5415,9 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
     Eigen::Matrix3d InfoA = pFrame->mpImuPreintegrated->C.block<3,3>(12,12).cast<double>().inverse();
     ear->setInformation(InfoA);
     optimizer.addEdge(ear);
+
+    AddFrameBaroEdge(optimizer, VP, pFrame->mTimeStamp, pFp->mTimeStamp,
+                     static_cast<double>(pFp->GetImuPosition()(2)));
 
     if (!pFp->mpcpi)
         Verbose::PrintMess("pFp->mpcpi does not exist!!!\nPrevious Frame " + to_string(pFp->mnId), Verbose::VERBOSITY_NORMAL);

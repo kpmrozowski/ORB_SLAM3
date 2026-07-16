@@ -236,9 +236,17 @@ void LoopClosing::Run()
                         g2o::Sim3 g2oSww_new = g2oTwc*mg2oLoopScw;
 
                         Eigen::Vector3d phi = LogSO3(g2oSww_new.rotation().toRotationMatrix());
-                        cout << "phi = " << phi.transpose() << endl; 
-                        if (fabs(phi(0))<0.008f && fabs(phi(1))<0.008f && fabs(phi(2))<0.349f)
+                        cout << "phi = " << phi.transpose() << endl;
+                        // Roll/pitch/yaw loop-acceptance tolerances (rad), env-overridable.
+                        // Defaults preserve stock ORB-SLAM3 behavior (0.008 rad roll/pitch, 0.349 rad yaw).
+                        // Rationale: post-BA2 the accepted loop forces roll/pitch to zero anyway (IMU
+                        // gravity trusted), so a wider roll/pitch tol just admits true loops whose small
+                        // gravity-alignment mismatch would be discarded regardless.
+                        static const float loopRpTol = getenv("ORB_LOOP_RP_TOL") ? atof(getenv("ORB_LOOP_RP_TOL")) : 0.008f;
+                        static const float loopYawTol = getenv("ORB_LOOP_YAW_TOL") ? atof(getenv("ORB_LOOP_YAW_TOL")) : 0.349f;
+                        if (fabs(phi(0))<loopRpTol && fabs(phi(1))<loopRpTol && fabs(phi(2))<loopYawTol)
                         {
+                            cout << "GOOD LOOP accepted (RpTol=" << loopRpTol << " YawTol=" << loopYawTol << ")" << endl;
                             if(mpCurrentKF->GetMap()->IsInertial())
                             {
                                 // If inertial, force only yaw

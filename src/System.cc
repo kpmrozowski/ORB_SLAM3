@@ -1383,6 +1383,25 @@ float System::GetImageScale()
     return mpTracker->GetImageScale();
 }
 
+void System::SetPrefetch(const std::vector<std::string>& imagePaths,
+                         const std::vector<double>& timestamps)
+{
+    if (std::getenv("ORB_PREFETCH") == nullptr)
+    {
+        return;
+    }
+    // If the settings request a resize the extractor sees a rescaled image, but the prefetcher reads
+    // the file at native resolution -> keypoints would mismatch. Disable rather than serve stale
+    // results (Tracking::SetupPrefetch applies the same guard for the example-level image scale).
+    if (settings_ && settings_->needToResize())
+    {
+        std::cerr << "FeaturePrefetcher: settings request a resize -> disabled (would mismatch)"
+                  << std::endl;
+        return;
+    }
+    mpTracker->SetupPrefetch(imagePaths, timestamps);
+}
+
 #ifdef REGISTER_TIMES
 void System::InsertRectTime(double& time)
 {

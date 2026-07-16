@@ -32,6 +32,7 @@
 #include "ORBVocabulary.h"
 #include "KeyFrameDatabase.h"
 #include "ORBextractor.h"
+#include "FeaturePrefetcher.h"
 #include "MapDrawer.h"
 #include "System.h"
 #include "ImuTypes.h"
@@ -107,6 +108,11 @@ public:
     void SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, Map* pMap);
 
     float GetImageScale();
+
+    // Env-gated (ORB_PREFETCH) multi-threaded feature pre-extraction. No-op when ORB_PREFETCH is
+    // unset. imagePaths/timestamps must be in the exact order frames will be processed.
+    void SetupPrefetch(const std::vector<std::string>& imagePaths,
+                       const std::vector<double>& timestamps);
 
 #ifdef REGISTER_LOOP
     void RequestStop();
@@ -260,6 +266,9 @@ protected:
     //ORB
     ORBextractor* mpORBextractorLeft, *mpORBextractorRight;
     ORBextractor* mpIniORBextractor;
+
+    // Owns the feature prefetcher when ORB_PREFETCH is enabled (nullptr otherwise).
+    std::unique_ptr<FeaturePrefetcher> mpFeaturePrefetcher;
 
     //BoW
     ORBVocabulary* mpORBVocabulary;

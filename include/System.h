@@ -186,6 +186,10 @@ public:
 
     float GetImageScale();
 
+    // Env-gated (ORB_PREFETCH) multi-threaded ORB feature pre-extraction. No-op unless ORB_PREFETCH
+    // is set. imagePaths/timestamps must be the exact order frames are fed to TrackMonocular.
+    void SetPrefetch(const std::vector<std::string>& imagePaths, const std::vector<double>& timestamps);
+
 #ifdef REGISTER_TIMES
     void InsertRectTime(double& time);
     void InsertResizeTime(double& time);

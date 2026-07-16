@@ -21,6 +21,8 @@
 #include "LoopClosing.h"
 #include "ORBmatcher.h"
 #include "Optimizer.h"
+#include "BaroFusion.h"
+#include "MagFusion.h"
 #include "Converter.h"
 #include "GeometricTools.h"
 
@@ -238,6 +240,28 @@ void LocalMapping::Run()
                             if (mbMonocular)
                                 ScaleRefinement();
                         }
+                    }
+                }
+
+                // Periodic barometric scale refinement (env ORB_BARO_SCALEREF_S, seconds): re-run
+                // the (Rwg, scale) inertial optimization — which includes the EdgeBaroScaleGDir
+                // vertical-scale edges — for the WHOLE flight, so the monocular vertical scale
+                // cannot drift away after the upstream one-off refinements (weak-parallax
+                // high-altitude legs collapse it otherwise, observed v-scale 0.3-0.4).
+                if (mbInertial && mbMonocular && BaroFusion::Instance().Enabled())
+                {
+                    static const double baroRefinementPeriod =
+                        getenv("ORB_BARO_SCALEREF_S") ? atof(getenv("ORB_BARO_SCALEREF_S")) : 0.0;
+                    static double lastBaroRefinementTime = -1.0;
+                    if (baroRefinementPeriod > 0.0 &&
+                        mpCurrentKeyFrame->GetMap()->isImuInitialized() &&
+                        mpTracker->mState == Tracking::OK &&
+                        mpCurrentKeyFrame->mTimeStamp - lastBaroRefinementTime > baroRefinementPeriod)
+                    {
+                        lastBaroRefinementTime = mpCurrentKeyFrame->mTimeStamp;
+                        std::cout << "BaroFusion: periodic scale refinement at t="
+                                  << mpCurrentKeyFrame->mTimeStamp << std::endl;
+                        ScaleRefinement();
                     }
                 }
             }
@@ -1282,6 +1306,32 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
             Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
             mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
             mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
+        }
+
+        // Compass-aligned init (SOTA: gravity fixes roll/pitch above, compass fixes yaw). The world
+        // is now +z up, so rotate it about z until the horizontal Earth field lands on world +x
+        // (yaw = magnetic north). A pure-yaw ApplyScaledRotation keeps the gravity alignment intact.
+        // Gated on GetIniertialBA2 (mature IMU init): the coarse early inits carry a poorly-known
+        // attitude, so aligning yaw there applies huge WRONG global rotations that churn the fragile
+        // init/reset loop (both flights). VIBA2 is set just before this init call, so this fires once
+        // per map, when the attitude — and thus the magnetic yaw — is trustworthy.
+        Eigen::Vector3d fieldBody;
+        if (MagFusion::Instance().Enabled() && mpAtlas->GetCurrentMap()->GetIniertialBA2() &&
+            MagFusion::Instance().FieldAt(mpCurrentKeyFrame->mTimeStamp, fieldBody)) {
+            const Eigen::Vector3f fieldWorld =
+                mpCurrentKeyFrame->GetImuRotation() * fieldBody.cast<float>();
+            const float yaw = std::atan2(fieldWorld.y(), fieldWorld.x());
+            const Eigen::Matrix3f Rz(Eigen::AngleAxisf(-yaw, Eigen::Vector3f::UnitZ()));
+            mpAtlas->GetCurrentMap()->ApplyScaledRotation(
+                Sophus::SE3f(Rz, Eigen::Vector3f::Zero()), 1.f, true);
+            mpTracker->UpdateFrameIMU(1.f, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
+            const Eigen::Vector3f fieldWorldAfter =
+                mpCurrentKeyFrame->GetImuRotation() * fieldBody.cast<float>();
+            const float yawAfter = std::atan2(fieldWorldAfter.y(), fieldWorldAfter.x());
+            const float toDeg = 180.f / static_cast<float>(M_PI);
+            std::cout << "MagFusion: world yaw aligned to magnetic north (rotated "
+                      << (-yaw * toDeg) << " deg), post-alignment field yaw "
+                      << (yawAfter * toDeg) << " deg" << std::endl;
         }
 
         // Check if initialization OK

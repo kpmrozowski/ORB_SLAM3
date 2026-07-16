@@ -22,6 +22,7 @@
 #include "MapPoint.h"
 #include "KeyFrame.h"
 #include "ORBextractor.h"
+#include "FeaturePrefetcher.h"
 #include "Converter.h"
 #include "ORBmatcher.h"
 #include "GeometricCamera.h"
@@ -419,7 +420,28 @@ void Frame::ExtractORB(int flag, const cv::Mat &im, const int x0, const int x1)
 {
     vector<int> vLapping = {x0,x1};
     if(flag==0)
+    {
+        // Prefetch cache serves ONLY the NORMAL extractor (never the 5x initialization extractor).
+        // A registered prefetcher plus a matching extractor pointer means the keypoints for this
+        // timestamp were (or are being) precomputed by a worker thread with identical parameters
+        // and identical preprocessing, so we can consume them instead of extracting inline.
+        FeaturePrefetcher* const prefetcher = FeaturePrefetcher::Registered();
+        if(prefetcher != nullptr && mpORBextractorLeft == prefetcher->NormalExtractor())
+        {
+            int cachedMonoIndex = 0;
+            if(prefetcher->Take(mTimeStamp, mvKeys, mDescriptors, cachedMonoIndex))
+            {
+                monoLeft = cachedMonoIndex;  // mirrors the operator() return of the inline path
+                return;
+            }
+        }
         monoLeft = (*mpORBextractorLeft)(im,cv::Mat(),mvKeys,mDescriptors,vLapping);
+        // Capture the per-frame FAST-detection diagnostics from the just-run inline extraction.
+        // (The prefetch cache-hit path above returns early and leaves these at their 0 defaults.)
+        mnFeatDetInitTh = mpORBextractorLeft->GetInitThreshDetections();
+        mnFeatDetUsedTh = mpORBextractorLeft->GetUsedThreshDetections();
+        mnFinalThFAST = mpORBextractorLeft->GetFinalThFAST();
+    }
     else
         monoRight = (*mpORBextractorRight)(im,cv::Mat(),mvKeysRight,mDescriptorsRight,vLapping);
 }

@@ -21,6 +21,7 @@
 #include<algorithm>
 #include<fstream>
 #include<chrono>
+#include <cstdlib>
 #include <ctime>
 #include <sstream>
 
@@ -117,8 +118,20 @@ int main(int argc, char *argv[])
     cout.precision(17);
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_MONOCULAR, true);
+    // Pangolin viewer: headless by default, enabled when the ORB_VIEWER env var is set (ORB_VIEWER=1).
+    const bool use_viewer = (std::getenv("ORB_VIEWER") != nullptr);
+    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_MONOCULAR, use_viewer);
     float imageScale = SLAM.GetImageScale();
+
+    // Optional multi-threaded feature prefetch (ORB_PREFETCH). Only wired for a single sequence:
+    // the prefetcher consumes one monotonic timestamp stream, which multi-sequence runs violate.
+    if (std::getenv("ORB_PREFETCH") != nullptr)
+    {
+        if (num_seq == 1)
+            SLAM.SetPrefetch(vstrImageFilenames[0], vTimestampsCam[0]);
+        else
+            cout << "ORB_PREFETCH set but num_seq>1 -> prefetch disabled (single-stream only)" << endl;
+    }
 
     double t_resize = 0.f;
     double t_track = 0.f;
@@ -218,7 +231,8 @@ int main(int argc, char *argv[])
             else if(ni>0)
                 T = tframe-vTimestampsCam[seq][ni-1];
 
-            if(ttrack<T)
+            // Real-time pacing; skipped with ORB_NO_PACE to run as fast as tracking allows.
+            if(ttrack<T && std::getenv("ORB_NO_PACE") == nullptr)
                 usleep((T-ttrack)*1e6); // 1e6
         }
         if(seq < num_seq - 1)

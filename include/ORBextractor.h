@@ -58,11 +58,40 @@ public:
                     std::vector<cv::KeyPoint>& _keypoints,
                     cv::OutputArray _descriptors, std::vector<int> &vLappingArea);
 
-    int inline GetLevels(){
+    int inline GetLevels() const {
         return nlevels;}
 
-    float inline GetScaleFactor(){
+    float inline GetScaleFactor() const {
         return scaleFactor;}
+
+    // Const getters for the raw construction parameters, used by FeaturePrefetcher to clone an
+    // identically-configured extractor in each worker thread.
+    int inline GetFeatures() const {
+        return nfeatures;}
+
+    int inline GetIniThFAST() const {
+        return iniThFAST;}
+
+    int inline GetMinThFAST() const {
+        return minThFAST;}
+
+    // Per-frame FAST-detection diagnostics from the most recent operator() call (see
+    // ComputeKeyPointsOctTree): raw corner counts BEFORE the octree redistribution, summed over all
+    // pyramid levels and grid cells. "Initial" counts only what the initial threshold (iniThFAST)
+    // yielded; "Used" counts what the actually-applied per-cell threshold yielded (iniThFAST where
+    // it produced corners, minThFAST in the cells that fell back). "CellsFellBack" is how many cells
+    // had to drop to minThFAST, so the effective final threshold is minThFAST iff it is > 0.
+    int inline GetInitThreshDetections() const {
+        return mInitThreshDetections;}
+
+    int inline GetUsedThreshDetections() const {
+        return mUsedThreshDetections;}
+
+    int inline GetCellsFellBack() const {
+        return mCellsFellBack;}
+
+    int inline GetFinalThFAST() const {
+        return mCellsFellBack > 0 ? minThFAST : iniThFAST;}
 
     std::vector<float> inline GetScaleFactors(){
         return mvScaleFactor;
@@ -97,6 +126,11 @@ protected:
     int nlevels;
     int iniThFAST;
     int minThFAST;
+
+    // Per-frame FAST-detection diagnostics, reset and accumulated inside ComputeKeyPointsOctTree.
+    int mInitThreshDetections = 0;
+    int mUsedThreshDetections = 0;
+    int mCellsFellBack = 0;
 
     std::vector<int> mnFeaturesPerLevel;
 

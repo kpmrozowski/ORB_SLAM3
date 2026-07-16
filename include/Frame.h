@@ -222,6 +222,13 @@ public:
     // Number of KeyPoints.
     int N;
 
+    // Per-frame FAST-detection diagnostics captured from the ORB extractor (see ORBextractor.h):
+    // raw corner counts (pre-octree) at the initial threshold and at the actually-used per-cell
+    // threshold, and the effective final FAST threshold (minThFAST if any cell fell back).
+    int mnFeatDetInitTh = 0;
+    int mnFeatDetUsedTh = 0;
+    int mnFinalThFAST = 0;
+
     // Vector of keypoints (original for visualization) and undistorted (actually used by the system).
     // In the stereo case, mvKeysUn is redundant as images must be rectified.
     // In the RGB-D case, RGB images can be distorted.

@@ -31,14 +31,64 @@
 
 #include <iostream>
 
-#include <mutex>
 #include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 
 using namespace std;
 
 namespace ORB_SLAM3
 {
+
+namespace
+{
+// Frame-gap (timestamp jump) reset threshold in seconds. Upstream ORB-SLAM3 hardcodes 1.0 s:
+// any gap between consecutive frames larger than this resets/splits the active map. On datasets
+// with multi-second camera frame-drops but CONTINUOUS IMU (e.g. NORA aerial logs), that fragments
+// the map at every drop. Raising it above the largest drop lets the IMU preintegrate across the
+// gap instead of resetting. Configurable via ORB_TSJUMP_S; default 1.0 preserves upstream behavior.
+double timestamp_jump_threshold_seconds()
+{
+    static const double threshold =
+        std::getenv("ORB_TSJUMP_S") != nullptr ? std::atof(std::getenv("ORB_TSJUMP_S")) : 1.0;
+    return threshold;
+}
+
+// Per-frame tracking statistics, enabled by setting ORB_STATS_CSV=<path>.
+// Appends one CSV row per processed frame: timestamp [s], tracking state
+// (SYSTEM_NOT_READY=-1, NO_IMAGES_YET=0, NOT_INITIALIZED=1, OK=2, RECENTLY_LOST=3, LOST=4),
+// ORB detections (Frame::N), local-map matched inliers (only meaningful when state==OK),
+// and full per-frame cost of GrabImageMonocular (ORB extraction + Track) in ms.
+void append_frame_stats(const double timestamp_seconds, const int tracking_state, const int num_detections,
+                        const int matches_inliers, const double grab_ms, const int feat_init_th,
+                        const int feat_used_th, const int final_th_fast)
+{
+    static const char* const stats_path = std::getenv("ORB_STATS_CSV");
+    if (stats_path == nullptr)
+    {
+        return;
+    }
+    static std::ofstream stats_stream;
+    if (!stats_stream.is_open())
+    {
+        stats_stream.open(stats_path, std::ios::app);
+        stats_stream << "timestamp,state,detections,matches_inliers,grab_ms,"
+                     << "feat_init_th,feat_used_th,final_th_fast\n";
+    }
+    stats_stream << std::fixed << std::setprecision(6) << timestamp_seconds << ','
+                 << tracking_state << ',' << num_detections << ',' << matches_inliers << ','
+                 << std::setprecision(3) << grab_ms << ',' << feat_init_th << ',' << feat_used_th
+                 << ',' << final_th_fast << '\n';
+    // Flush per row so stats survive a timeout/abort (offline runs are frequently killed by a
+    // wall-clock guard before the static stream would otherwise be closed).
+    stats_stream.flush();
+}
+}  // namespace
 
 
 Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
@@ -1565,6 +1615,7 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
 
 Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
 {
+    const std::chrono::steady_clock::time_point grab_start_time = std::chrono::steady_clock::now();
     mImGray = im;
     if(mImGray.channels()==3)
     {
@@ -1579,6 +1630,15 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
             cvtColor(mImGray,mImGray,cv::COLOR_RGBA2GRAY);
         else
             cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
+    }
+
+    // --- env-gated CLAHE preprocessing (dim footage; same role as VINS 'equalize') ---
+    static const float claheClip = getenv("ORB_CLAHE") ? atof(getenv("ORB_CLAHE")) : 0.0f;
+    if (claheClip > 0.0f)
+    {
+        static const int claheTile = getenv("ORB_CLAHE_TILE") ? atoi(getenv("ORB_CLAHE_TILE")) : 8;
+        static cv::Ptr<cv::CLAHE> clahePtr = cv::createCLAHE(claheClip, cv::Size(claheTile, claheTile));
+        clahePtr->apply(mImGray, mImGray);
     }
 
     if (mSensor == System::MONOCULAR)
@@ -1610,6 +1670,13 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 
     lastID = mCurrentFrame.mnId;
     Track();
+
+    const double grab_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                               std::chrono::steady_clock::now() - grab_start_time)
+                               .count();
+    append_frame_stats(timestamp, static_cast<int>(mState), mCurrentFrame.N, mnMatchesInliers, grab_ms,
+                       mCurrentFrame.mnFeatDetInitTh, mCurrentFrame.mnFeatDetUsedTh,
+                       mCurrentFrame.mnFinalThFAST);
 
     return mCurrentFrame.GetPose();
 }
@@ -1825,7 +1892,7 @@ void Tracking::Track()
             CreateMapInAtlas();
             return;
         }
-        else if(mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+1.0)
+        else if(mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+timestamp_jump_threshold_seconds())
         {
             // cout << mCurrentFrame.mTimeStamp << ", " << mLastFrame.mTimeStamp << endl;
             // cout << "id last: " << mLastFrame.mnId << "    id curr: " << mCurrentFrame.mnId << endl;
@@ -4081,6 +4148,47 @@ void Tracking::SaveSubTrajectory(string strNameFile_frames, string strNameFile_k
 float Tracking::GetImageScale()
 {
     return mImageScale;
+}
+
+void Tracking::SetupPrefetch(const std::vector<std::string>& imagePaths,
+                             const std::vector<double>& timestamps)
+{
+    const char* const prefetchEnv = std::getenv("ORB_PREFETCH");
+    if (prefetchEnv == nullptr)
+    {
+        return;
+    }
+    if (imagePaths.empty() || imagePaths.size() != timestamps.size())
+    {
+        std::cerr << "FeaturePrefetcher: image/timestamp lists empty or mismatched -> disabled"
+                  << std::endl;
+        return;
+    }
+    // The prefetcher reads full-resolution files; if the tracker rescales the image the cached
+    // keypoints would not match. Disable rather than serve stale results.
+    if (mImageScale != 1.f)
+    {
+        std::cerr << "FeaturePrefetcher: image scale " << mImageScale
+                  << " != 1 -> disabled (prefetch would mismatch)" << std::endl;
+        return;
+    }
+    const std::string prefetchValue(prefetchEnv);
+    int numWorkers = 0;
+    if (prefetchValue == "all")
+    {
+        numWorkers = static_cast<int>(std::thread::hardware_concurrency());
+    }
+    else
+    {
+        numWorkers = std::atoi(prefetchEnv);
+    }
+    if (numWorkers < 1)
+    {
+        numWorkers = 1;
+    }
+    mpFeaturePrefetcher = std::make_unique<FeaturePrefetcher>(imagePaths, timestamps,
+                                                              mpORBextractorLeft, numWorkers, mbRGB);
+    FeaturePrefetcher::Register(mpFeaturePrefetcher.get());
 }
 
 #ifdef REGISTER_LOOP
