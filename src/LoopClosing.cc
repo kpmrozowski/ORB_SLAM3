@@ -28,9 +28,35 @@
 #include<mutex>
 #include<thread>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+
 
 namespace ORB_SLAM3
 {
+
+// Place-recognition sensitivity knobs (env-overridable; defaults preserve stock ORB-SLAM3).
+//   ORB_PR_NCAND        BoW candidates fetched per keyframe (stock 3)
+//   ORB_PR_COINC        consecutive-KF geometric verifications required for a loop (stock 3)
+//   ORB_PR_MATCH_SCALE  multiplier applied to every match/inlier count threshold (stock 1.0)
+// Merge (multi-map) thresholds are left stock — only intra-map loop detection is tuned.
+static int PrNumCandidates()
+{
+    static const int value = getenv("ORB_PR_NCAND") ? atoi(getenv("ORB_PR_NCAND")) : 3;
+    return value;
+}
+static int PrCoincidences()
+{
+    static const int value = getenv("ORB_PR_COINC") ? atoi(getenv("ORB_PR_COINC")) : 3;
+    return value;
+}
+static int PrScaled(const int stockThreshold)
+{
+    static const float scale =
+        getenv("ORB_PR_MATCH_SCALE") ? atof(getenv("ORB_PR_MATCH_SCALE")) : 1.0f;
+    return std::max(1, static_cast<int>(std::lround(stockThreshold * scale)));
+}
 
 LoopClosing::LoopClosing(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC):
     mbResetRequested(false), mbResetActiveMapRequested(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas),
@@ -401,7 +427,7 @@ bool LoopClosing::NewDetectCommonRegions()
             mvpLoopMatchedMPs = vpMatchedMPs;
 
 
-            mbLoopDetected = mnLoopNumCoincidences >= 3;
+            mbLoopDetected = mnLoopNumCoincidences >= PrCoincidences();
             mnLoopNumNotFound = 0;
 
             if(!mbLoopDetected)
@@ -496,7 +522,7 @@ bool LoopClosing::NewDetectCommonRegions()
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartQuery = std::chrono::steady_clock::now();
 #endif
-        mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF, vpLoopBowCand, vpMergeBowCand,3);
+        mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF, vpLoopBowCand, vpMergeBowCand, PrNumCandidates());
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_EndQuery = std::chrono::steady_clock::now();
 
@@ -546,9 +572,9 @@ bool LoopClosing::DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame*
     set<MapPoint*> spAlreadyMatchedMPs;
     nNumProjMatches = FindMatchesByProjection(pCurrentKF, pMatchedKF, gScw, spAlreadyMatchedMPs, vpMPs, vpMatchedMPs);
 
-    int nProjMatches = 30;
-    int nProjOptMatches = 50;
-    int nProjMatchesRep = 100;
+    int nProjMatches = PrScaled(30);
+    int nProjOptMatches = PrScaled(50);
+    int nProjMatchesRep = PrScaled(100);
 
     if(nNumProjMatches >= nProjMatches)
     {
@@ -586,11 +612,11 @@ bool LoopClosing::DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame*
 bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, KeyFrame* &pMatchedKF2, KeyFrame* &pLastCurrentKF, g2o::Sim3 &g2oScw,
                                              int &nNumCoincidences, std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs)
 {
-    int nBoWMatches = 20;
-    int nBoWInliers = 15;
-    int nSim3Inliers = 20;
-    int nProjMatches = 50;
-    int nProjOptMatches = 80;
+    int nBoWMatches = PrScaled(20);
+    int nBoWInliers = PrScaled(15);
+    int nSim3Inliers = PrScaled(20);
+    int nProjMatches = PrScaled(50);
+    int nProjOptMatches = PrScaled(80);
 
     set<KeyFrame*> spConnectedKeyFrames = mpCurrentKF->GetConnectedKeyFrames();
 
@@ -885,7 +911,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
         vpMPs = vpBestMapPoints;
         vpMatchedMPs = vpBestMatchedMapPoints;
 
-        return nNumCoincidences >= 3;
+        return nNumCoincidences >= PrCoincidences();
     }
     else
     {
@@ -909,7 +935,7 @@ bool LoopClosing::DetectCommonRegionsFromLastKF(KeyFrame* pCurrentKF, KeyFrame* 
     set<MapPoint*> spAlreadyMatchedMPs(vpMatchedMPs.begin(), vpMatchedMPs.end());
     nNumProjMatches = FindMatchesByProjection(pCurrentKF, pMatchedKF, gScw, spAlreadyMatchedMPs, vpMPs, vpMatchedMPs);
 
-    int nProjMatches = 30;
+    int nProjMatches = PrScaled(30);
     if(nNumProjMatches >= nProjMatches)
     {
         return true;
