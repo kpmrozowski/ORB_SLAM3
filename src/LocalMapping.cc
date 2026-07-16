@@ -17,6 +17,7 @@
 */
 
 
+#include "DeterministicOrder.h"
 #include "LocalMapping.h"
 #include "LoopClosing.h"
 #include "ORBmatcher.h"
@@ -63,18 +64,35 @@ void LocalMapping::SetTracker(Tracking *pTracker)
     mpTracker=pTracker;
 }
 
-void LocalMapping::Run()
+/** One full pass of the mapping work for a single queued keyframe — the body of Run()'s
+ *  main branch, shared with the deterministic sequential mode. */
+
+static void DetPrintMapFingerprint(Atlas* pAtlas, KeyFrame* pKF, const char* stage)
 {
-    mbFinished = false;
-
-    while(1)
+    if (!getenv("ORB_DET_DEBUG"))
     {
-        // Tracking will see that Local Mapping is busy
-        SetAcceptKeyFrames(false);
-
-        // Check if there are keyframes in the queue
-        if(CheckNewKeyFrames() && !mbBadImu)
+        return;
+    }
+    double sum = 0.0;
+    long count = 0;
+    const std::vector<MapPoint*> allPoints = pAtlas->GetCurrentMap()->GetAllMapPoints();
+    for (MapPoint* pMP : allPoints)
+    {
+        if (!pMP || pMP->isBad())
         {
+            continue;
+        }
+        const Eigen::Vector3f pos = pMP->GetWorldPos();
+        sum += static_cast<double>(pos.x()) + static_cast<double>(pos.y()) + static_cast<double>(pos.z());
+        count++;
+    }
+    printf("DETMAP kf=%ld %s nMP=%ld possum=%.17g\n",
+           static_cast<long>(pKF->mnId), stage, count, sum);
+}
+
+void LocalMapping::ProcessQueueOnce()
+{
+
 #ifdef REGISTER_TIMES
             double timeLBA_ms = 0;
             double timeKFCulling_ms = 0;
@@ -83,6 +101,13 @@ void LocalMapping::Run()
 #endif
             // BoW conversion and insertion in Map
             ProcessNewKeyFrame();
+            DetPrintMapFingerprint(mpAtlas, mpCurrentKeyFrame, "proc");
+            if (getenv("ORB_DET_DEBUG"))
+            {
+                std::cout << "DETDBG KF" << mpCurrentKeyFrame->mnId
+                          << " t=" << mpCurrentKeyFrame->mTimeStamp
+                          << " ptr=" << static_cast<const void*>(mpCurrentKeyFrame) << std::endl;
+            }
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndProcessKF = std::chrono::steady_clock::now();
 
@@ -92,6 +117,7 @@ void LocalMapping::Run()
 
             // Check recent MapPoints
             MapPointCulling();
+            DetPrintMapFingerprint(mpAtlas, mpCurrentKeyFrame, "cull");
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndMPCulling = std::chrono::steady_clock::now();
 
@@ -101,6 +127,7 @@ void LocalMapping::Run()
 
             // Triangulate new MapPoints
             CreateNewMapPoints();
+            DetPrintMapFingerprint(mpAtlas, mpCurrentKeyFrame, "tri");
 
             mbAbortBA = false;
 
@@ -108,6 +135,7 @@ void LocalMapping::Run()
             {
                 // Find more matches in neighbor keyframes and fuse point duplications
                 SearchInNeighbors();
+                DetPrintMapFingerprint(mpAtlas, mpCurrentKeyFrame, "fuse");
             }
 
 #ifdef REGISTER_TIMES
@@ -279,6 +307,34 @@ void LocalMapping::Run()
             double timeLocalMap = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndLocalMap - time_StartProcessKF).count();
             vdLMTotal_ms.push_back(timeLocalMap);
 #endif
+        }
+
+/** Deterministic sequential mode (env ORB_DETERMINISTIC): drain the keyframe queue in the
+ *  caller's thread. Replaces the free-running Run() thread; identical work, fixed order. */
+void LocalMapping::SpinOnceDeterministic()
+{
+    SetAcceptKeyFrames(false);
+    while (CheckNewKeyFrames() && !mbBadImu)
+    {
+        ProcessQueueOnce();
+    }
+    ResetIfRequested();
+    SetAcceptKeyFrames(true);
+}
+
+void LocalMapping::Run()
+{
+    mbFinished = false;
+
+    while(1)
+    {
+        // Tracking will see that Local Mapping is busy
+        SetAcceptKeyFrames(false);
+
+        // Check if there are keyframes in the queue
+        if(CheckNewKeyFrames() && !mbBadImu)
+        {
+            ProcessQueueOnce();
         }
         else if(Stop() && !mbBadImu)
         {
@@ -848,6 +904,18 @@ void LocalMapping::SearchInNeighbors()
 
 void LocalMapping::RequestStop()
 {
+    // Deterministic sequential mode: there is no mapping thread to acknowledge the stop —
+    // between frames the mapper is trivially idle, so honour the request immediately.
+    static const bool deterministic = getenv("ORB_DETERMINISTIC") != nullptr;
+    if (deterministic)
+    {
+        unique_lock<mutex> lockStop(mMutexStop);
+        mbStopRequested = true;
+        mbStopped = true;
+        unique_lock<mutex> lock2(mMutexNewKFs);
+        mbAbortBA = true;
+        return;
+    }
     unique_lock<mutex> lock(mMutexStop);
     mbStopRequested = true;
     unique_lock<mutex> lock2(mMutexNewKFs);
@@ -992,9 +1060,9 @@ void LocalMapping::KeyFrameCulling()
                         const int &scaleLevel = (pKF -> NLeft == -1) ? pKF->mvKeysUn[i].octave
                                                                      : (i < pKF -> NLeft) ? pKF -> mvKeys[i].octave
                                                                                           : pKF -> mvKeysRight[i].octave;
-                        const map<KeyFrame*, tuple<int,int>> observations = pMP->GetObservations();
+                        const map<KeyFrame*, tuple<int,int>, IdLess> observations = pMP->GetObservations();
                         int nObs=0;
-                        for(map<KeyFrame*, tuple<int,int>>::const_iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
+                        for(map<KeyFrame*, tuple<int,int>, IdLess>::const_iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
                         {
                             KeyFrame* pKFi = mit->first;
                             if(pKFi==pKF)
@@ -1084,6 +1152,14 @@ void LocalMapping::RequestReset()
         cout << "LM: Map reset recieved" << endl;
         mbResetRequested = true;
     }
+    // Deterministic sequential mode: no worker thread exists to acknowledge — execute the
+    // reset synchronously in the caller's thread.
+    static const bool deterministic = getenv("ORB_DETERMINISTIC") != nullptr;
+    if (deterministic)
+    {
+        ResetIfRequested();
+        return;
+    }
     cout << "LM: Map reset, waiting..." << endl;
 
     while(1)
@@ -1105,6 +1181,14 @@ void LocalMapping::RequestResetActiveMap(Map* pMap)
         cout << "LM: Active map reset recieved" << endl;
         mbResetRequestedActiveMap = true;
         mpMapToReset = pMap;
+    }
+    // Deterministic sequential mode: no worker thread exists to acknowledge — execute the
+    // reset synchronously in the caller's thread.
+    static const bool deterministic = getenv("ORB_DETERMINISTIC") != nullptr;
+    if (deterministic)
+    {
+        ResetIfRequested();
+        return;
     }
     cout << "LM: Active map reset, waiting..." << endl;
 
@@ -1234,6 +1318,27 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     if(mpCurrentKeyFrame->mTimeStamp-mFirstTs<minTime)
         return;
 
+    if (getenv("ORB_DET_DEBUG"))
+    {
+        for (KeyFrame* pKFi : vpKF)
+        {
+            if (!pKFi->mpImuPreintegrated)
+            {
+                printf("DETPRE kf=%ld NOPREINT\n", static_cast<long>(pKFi->mnId));
+                continue;
+            }
+            IMU::Preintegrated* pre = pKFi->mpImuPreintegrated;
+            const IMU::Bias bias = pre->GetOriginalBias();
+            printf("DETPRE kf=%ld dT=%.9e dV=%.9e dP=%.9e C=%.9e Nga=%.9e b=%.9e v=%.9e\n",
+                   static_cast<long>(pKFi->mnId), (double)pre->dT,
+                   (double)pre->GetOriginalDeltaVelocity().sum(),
+                   (double)pre->GetOriginalDeltaPosition().sum(),
+                   (double)pre->C.sum(), (double)pre->Nga.diagonal().sum(),
+                   (double)(bias.bax+bias.bay+bias.baz+bias.bwx+bias.bwy+bias.bwz),
+                   (double)pKFi->GetVelocity().sum());
+        }
+    }
+
     bInitializing = true;
 
     while(CheckNewKeyFrames())
@@ -1289,6 +1394,11 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
     Optimizer::InertialOptimization(mpAtlas->GetCurrentMap(), mRwg, mScale, mbg, mba, mbMonocular, infoInertial, false, false, priorG, priorA);
+    if (getenv("ORB_DET_DEBUG"))
+    {
+        printf("DETINIT scale=%.17g bg=%.9e %.9e %.9e ba=%.9e %.9e %.9e Rwg00=%.17g\n",
+               mScale, mbg.x(), mbg.y(), mbg.z(), mba.x(), mba.y(), mba.z(), mRwg(0,0));
+    }
 
     std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
@@ -1354,7 +1464,19 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     if (bFIBA)
     {
         if (priorA!=0.f)
+            if (getenv("ORB_DET_DEBUG"))
+            {
+                double vsum = 0.0;
+                for (KeyFrame* pKFd : vpKF) { vsum += (double)pKFd->GetVelocity().sum(); }
+                printf("DETVEL preFIBA vsum=%.17g\n", vsum);
+            }
             Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, true, priorG, priorA);
+            if (getenv("ORB_DET_DEBUG"))
+            {
+                double vsum = 0.0;
+                for (KeyFrame* pKFd : vpKF) { vsum += (double)pKFd->GetVelocity().sum(); }
+                printf("DETVEL postFIBA vsum=%.17g\n", vsum);
+            }
         else
             Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, false);
     }
@@ -1382,7 +1504,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     while(!lpKFtoCheck.empty())
     {
         KeyFrame* pKF = lpKFtoCheck.front();
-        const set<KeyFrame*> sChilds = pKF->GetChilds();
+        const set<KeyFrame*, IdLess> sChilds = pKF->GetChilds();
         Sophus::SE3f Twc = pKF->GetPoseInverse();
         for(set<KeyFrame*>::const_iterator sit=sChilds.begin();sit!=sChilds.end();sit++)
         {
@@ -1458,6 +1580,12 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
     Verbose::PrintMess("Map updated!", Verbose::VERBOSITY_NORMAL);
 
+    if (getenv("ORB_DET_DEBUG"))
+    {
+        double vsum = 0.0;
+        for (KeyFrame* pKFd : vpKF) { vsum += (double)pKFd->GetVelocity().sum(); }
+        printf("DETVEL endInit vsum=%.17g\n", vsum);
+    }
     mnKFs=vpKF.size();
     mIdxInit++;
 

@@ -17,6 +17,7 @@
 */
 
 
+#include "DeterministicOrder.h"
 #include "LoopClosing.h"
 
 #include "Sim3Solver.h"
@@ -123,19 +124,11 @@ void LoopClosing::SetLocalMapper(LocalMapping *pLocalMapper)
 }
 
 
-void LoopClosing::Run()
+/** One full pass of loop/merge detection+correction for a single queued keyframe — the body
+ *  of Run()'s main branch, shared with the deterministic sequential mode. */
+void LoopClosing::ProcessQueueOnce()
 {
-    mbFinished =false;
 
-    while(1)
-    {
-
-        //NEW LOOP AND MERGE DETECTION ALGORITHM
-        //----------------------------
-
-
-        if(CheckNewKeyFrames())
-        {
             if(mpLastCurrentKF)
             {
                 mpLastCurrentKF->mvpLoopCandKFs.clear();
@@ -186,7 +179,7 @@ void LoopClosing::Run()
                                 mnMergeNumNotFound = 0;
                                 mbMergeDetected = false;
                                 Verbose::PrintMess("scale bad estimated. Abort merging", Verbose::VERBOSITY_NORMAL);
-                                continue;
+                                return; // was `continue` in the Run() thread loop
                             }
                             // If inertial, force only yaw
                             if ((mpTracker->mSensor==System::IMU_MONOCULAR || mpTracker->mSensor==System::IMU_STEREO || mpTracker->mSensor==System::IMU_RGBD) &&
@@ -338,6 +331,33 @@ void LoopClosing::Run()
 
             }
             mpLastCurrentKF = mpCurrentKF;
+        }
+
+/** Deterministic sequential mode (env ORB_DETERMINISTIC): drain the queue in the caller's
+ *  thread. */
+void LoopClosing::SpinOnceDeterministic()
+{
+    while (CheckNewKeyFrames())
+    {
+        ProcessQueueOnce();
+    }
+    ResetIfRequested();
+}
+
+void LoopClosing::Run()
+{
+    mbFinished =false;
+
+    while(1)
+    {
+
+        //NEW LOOP AND MERGE DETECTION ALGORITHM
+        //----------------------------
+
+
+        if(CheckNewKeyFrames())
+        {
+            ProcessQueueOnce();
         }
 
         ResetIfRequested();
@@ -1284,7 +1304,15 @@ void LoopClosing::CorrectLoop()
         mbStopGBA = false;
         mnCorrectionGBA = mnNumCorrection;
 
-        mpThreadGBA = new thread(&LoopClosing::RunGlobalBundleAdjustment, this, pLoopMap, mpCurrentKF->mnId);
+        static const bool deterministicGBA = getenv("ORB_DETERMINISTIC") != nullptr;
+        if (deterministicGBA)
+        {
+            RunGlobalBundleAdjustment(pLoopMap, mpCurrentKF->mnId);
+        }
+        else
+        {
+            mpThreadGBA = new thread(&LoopClosing::RunGlobalBundleAdjustment, this, pLoopMap, mpCurrentKF->mnId);
+        }
     }
 
     // Loop closed. Release Local Mapping.
@@ -1365,7 +1393,7 @@ void LoopClosing::MergeLocal()
             pKFi = mpCurrentKF->mPrevKF;
             nInserted++;
 
-            set<MapPoint*> spMPi = pKFi->GetMapPoints();
+            set<MapPoint*, IdLess> spMPi = pKFi->GetMapPoints();
             spLocalWindowMPs.insert(spMPi.begin(), spMPi.end());
         }
 
@@ -1374,7 +1402,7 @@ void LoopClosing::MergeLocal()
         {
             spLocalWindowKFs.insert(pKFi);
 
-            set<MapPoint*> spMPi = pKFi->GetMapPoints();
+            set<MapPoint*, IdLess> spMPi = pKFi->GetMapPoints();
             spLocalWindowMPs.insert(spMPi.begin(), spMPi.end());
 
             pKFi = mpCurrentKF->mNextKF;
@@ -1416,7 +1444,7 @@ void LoopClosing::MergeLocal()
         if(!pKFi || pKFi->isBad())
             continue;
 
-        set<MapPoint*> spMPs = pKFi->GetMapPoints();
+        set<MapPoint*, IdLess> spMPs = pKFi->GetMapPoints();
         spLocalWindowMPs.insert(spMPs.begin(), spMPs.end());
     }
 
@@ -1472,7 +1500,7 @@ void LoopClosing::MergeLocal()
     set<MapPoint*> spMapPointMerge;
     for(KeyFrame* pKFi : spMergeConnectedKFs)
     {
-        set<MapPoint*> vpMPs = pKFi->GetMapPoints();
+        set<MapPoint*, IdLess> vpMPs = pKFi->GetMapPoints();
         spMapPointMerge.insert(vpMPs.begin(),vpMPs.end());
     }
 
@@ -1847,7 +1875,15 @@ void LoopClosing::MergeLocal()
         mbRunningGBA = true;
         mbFinishedGBA = false;
         mbStopGBA = false;
-        mpThreadGBA = new thread(&LoopClosing::RunGlobalBundleAdjustment,this, pMergeMap, mpCurrentKF->mnId);
+        static const bool deterministicGBA2 = getenv("ORB_DETERMINISTIC") != nullptr;
+        if (deterministicGBA2)
+        {
+            RunGlobalBundleAdjustment(pMergeMap, mpCurrentKF->mnId);
+        }
+        else
+        {
+            mpThreadGBA = new thread(&LoopClosing::RunGlobalBundleAdjustment,this, pMergeMap, mpCurrentKF->mnId);
+        }
     }
 
     mpMergeMatchedKF->AddMergeEdge(mpCurrentKF);
@@ -2059,7 +2095,7 @@ void LoopClosing::MergeLocal2()
     set<MapPoint*> spMapPointMerge;
     for(KeyFrame* pKFi : mvpMergeConnectedKFs)
     {
-        set<MapPoint*> vpMPs = pKFi->GetMapPoints();
+        set<MapPoint*, IdLess> vpMPs = pKFi->GetMapPoints();
         spMapPointMerge.insert(vpMPs.begin(),vpMPs.end());
         if(spMapPointMerge.size()>1000)
             break;
@@ -2149,7 +2185,7 @@ void LoopClosing::CheckObservations(set<KeyFrame*> &spKFsMap1, set<KeyFrame*> &s
     for(KeyFrame* pKFi1 : spKFsMap1)
     {
         map<KeyFrame*, int> mMatchedMP;
-        set<MapPoint*> spMPs = pKFi1->GetMapPoints();
+        set<MapPoint*, IdLess> spMPs = pKFi1->GetMapPoints();
 
         for(MapPoint* pMPij : spMPs)
         {
@@ -2158,7 +2194,7 @@ void LoopClosing::CheckObservations(set<KeyFrame*> &spKFsMap1, set<KeyFrame*> &s
                 continue;
             }
 
-            map<KeyFrame*, tuple<int,int>> mMPijObs = pMPij->GetObservations();
+            map<KeyFrame*, tuple<int,int>, IdLess> mMPijObs = pMPij->GetObservations();
             for(KeyFrame* pKFi2 : spKFsMap2)
             {
                 if(mMPijObs.find(pKFi2) != mMPijObs.end())
@@ -2284,6 +2320,13 @@ void LoopClosing::RequestReset()
         unique_lock<mutex> lock(mMutexReset);
         mbResetRequested = true;
     }
+    // Deterministic sequential mode: execute synchronously (no worker thread to acknowledge).
+    static const bool deterministicReset = getenv("ORB_DETERMINISTIC") != nullptr;
+    if (deterministicReset)
+    {
+        ResetIfRequested();
+        return;
+    }
 
     while(1)
     {
@@ -2302,6 +2345,13 @@ void LoopClosing::RequestResetActiveMap(Map *pMap)
         unique_lock<mutex> lock(mMutexReset);
         mbResetActiveMapRequested = true;
         mpMapToReset = pMap;
+    }
+    // Deterministic sequential mode: execute synchronously (no worker thread to acknowledge).
+    static const bool deterministicResetMap = getenv("ORB_DETERMINISTIC") != nullptr;
+    if (deterministicResetMap)
+    {
+        ResetIfRequested();
+        return;
     }
 
     while(1)
@@ -2417,7 +2467,7 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
             while(!lpKFtoCheck.empty())
             {
                 KeyFrame* pKF = lpKFtoCheck.front();
-                const set<KeyFrame*> sChilds = pKF->GetChilds();
+                const set<KeyFrame*, IdLess> sChilds = pKF->GetChilds();
                 //cout << "---Updating KF " << pKF->mnId << " with " << sChilds.size() << " childs" << endl;
                 //cout << " KF mnBAGlobalForKF: " << pKF->mnBAGlobalForKF << endl;
                 Sophus::SE3f Twc = pKF->GetPoseInverse();

@@ -61,6 +61,10 @@ public:
     // Main function
     void Run();
 
+    // Deterministic sequential mode (env ORB_DETERMINISTIC)
+    void ProcessQueueOnce();
+    void SpinOnceDeterministic();
+
     void InsertKeyFrame(KeyFrame *pKF);
 
     void RequestReset();

@@ -194,7 +194,22 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     //Initialize the Local Mapping thread and launch
     mpLocalMapper = new LocalMapping(this, mpAtlas, mSensor==MONOCULAR || mSensor==IMU_MONOCULAR,
                                      mSensor==IMU_MONOCULAR || mSensor==IMU_STEREO || mSensor==IMU_RGBD, strSequence);
-    mptLocalMapping = new thread(&ORB_SLAM3::LocalMapping::Run,mpLocalMapper);
+    // Deterministic sequential mode (env ORB_DETERMINISTIC): no mapping/loop threads —
+    // their queues are drained synchronously after every tracked frame (TrackMonocular).
+    // Removes all thread-interleaving nondeterminism (and the g2o concurrency race).
+    mbDeterministic = getenv("ORB_DETERMINISTIC") != nullptr;
+    if (mbDeterministic)
+    {
+        cout << "ORB_DETERMINISTIC: sequential LocalMapping/LoopClosing (no threads)" << endl;
+        // OpenCV's internal thread pool (GaussianBlur/resize in the ORB pyramid, CLAHE) must
+        // also be sequential — dynamic work splitting is not guaranteed bit-exact.
+        cv::setNumThreads(0);
+        mptLocalMapping = nullptr;
+    }
+    else
+    {
+        mptLocalMapping = new thread(&ORB_SLAM3::LocalMapping::Run,mpLocalMapper);
+    }
     mpLocalMapper->mInitFr = initFr;
     if(settings_)
         mpLocalMapper->mThFarPoints = settings_->thFarPoints();
@@ -211,7 +226,14 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     //Initialize the Loop Closing thread and launch
     // mSensor!=MONOCULAR && mSensor!=IMU_MONOCULAR
     mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR, activeLC); // mSensor!=MONOCULAR);
-    mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
+    if (mbDeterministic)
+    {
+        mptLoopClosing = nullptr;
+    }
+    else
+    {
+        mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
+    }
 
     //Set pointers between threads
     mpTracker->SetLocalMapper(mpLocalMapper);
@@ -464,6 +486,23 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
             mpTracker->GrabImuData(vImuMeas[i_imu]);
 
     Sophus::SE3f Tcw = mpTracker->GrabImageMonocular(imToFeed,timestamp,filename);
+
+    if (mbDeterministic)
+    {
+        mpLocalMapper->SpinOnceDeterministic();
+        mpLoopCloser->SpinOnceDeterministic();
+        static const bool detDebug = getenv("ORB_DET_DEBUG") != nullptr;
+        if (detDebug)
+        {
+            const Eigen::Vector3f translation = Tcw.translation();
+            Map* currentMap = mpAtlas->GetCurrentMap();
+            printf("DETFRM %.6f %.9e %.9e %.9e kps=%d nKF=%ld nMP=%ld\n", timestamp,
+                   translation.x(), translation.y(), translation.z(),
+                   static_cast<int>(mpTracker->mCurrentFrame.N),
+                   static_cast<long>(currentMap->KeyFramesInMap()),
+                   static_cast<long>(currentMap->MapPointsInMap()));
+        }
+    }
 
     unique_lock<mutex> lock2(mMutexState);
     mTrackingState = mpTracker->mState;

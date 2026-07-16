@@ -20,6 +20,7 @@
 #ifndef MAPPOINT_H
 #define MAPPOINT_H
 
+#include "DeterministicOrder.h"
 #include "KeyFrame.h"
 #include "Frame.h"
 #include "Map.h"
@@ -119,7 +120,7 @@ public:
 
     KeyFrame* GetReferenceKeyFrame();
 
-    std::map<KeyFrame*,std::tuple<int,int>> GetObservations();
+    std::map<KeyFrame*,std::tuple<int,int>,IdLess> GetObservations();
     int Observations();
 
     void AddObservation(KeyFrame* pKF,int idx);
@@ -157,7 +158,7 @@ public:
 
     void PrintObservations();
 
-    void PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP);
+    void PreSave(set<KeyFrame*, IdLess>& spKF,set<MapPoint*, IdLess>& spMP);
     void PostLoad(map<long unsigned int, KeyFrame*>& mpKFid, map<long unsigned int, MapPoint*>& mpMPid);
 
 public:
@@ -213,7 +214,7 @@ protected:
      Eigen::Vector3f mWorldPos;
 
      // Keyframes observing the point and associated index in keyframe
-     std::map<KeyFrame*,std::tuple<int,int> > mObservations;
+     std::map<KeyFrame*,std::tuple<int,int>,IdLess> mObservations;
      // For save relation without pointer, this is necessary for save/load function
      std::map<long unsigned int, int> mBackupObservationsId1;
      std::map<long unsigned int, int> mBackupObservationsId2;

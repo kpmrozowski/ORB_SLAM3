@@ -16,6 +16,7 @@
 * If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "DeterministicOrder.h"
 #include "KeyFrame.h"
 #include "Converter.h"
 #include "ImuTypes.h"
@@ -209,7 +210,15 @@ void KeyFrame::UpdateBestCovisibles()
     for(map<KeyFrame*,int>::iterator mit=mConnectedKeyFrameWeights.begin(), mend=mConnectedKeyFrameWeights.end(); mit!=mend; mit++)
        vPairs.push_back(make_pair(mit->second,mit->first));
 
-    sort(vPairs.begin(),vPairs.end());
+    sort(vPairs.begin(), vPairs.end(),
+         [](const pair<int,KeyFrame*>& left, const pair<int,KeyFrame*>& right)
+         {
+             if (left.first != right.first)
+             {
+                 return left.first < right.first;
+             }
+             return left.second->mnId < right.second->mnId;  // deterministic tie-break (was pointer order)
+         });
     list<KeyFrame*> lKFs;
     list<int> lWs;
     for(size_t i=0, iend=vPairs.size(); i<iend;i++)
@@ -322,10 +331,10 @@ void KeyFrame::ReplaceMapPointMatch(const int &idx, MapPoint* pMP)
     mvpMapPoints[idx]=pMP;
 }
 
-set<MapPoint*> KeyFrame::GetMapPoints()
+set<MapPoint*, IdLess> KeyFrame::GetMapPoints()
 {
     unique_lock<mutex> lock(mMutexFeatures);
-    set<MapPoint*> s;
+    set<MapPoint*, IdLess> s;
     for(size_t i=0, iend=mvpMapPoints.size(); i<iend; i++)
     {
         if(!mvpMapPoints[i])
@@ -378,7 +387,7 @@ MapPoint* KeyFrame::GetMapPoint(const size_t &idx)
 
 void KeyFrame::UpdateConnections(bool upParent)
 {
-    map<KeyFrame*,int> KFcounter;
+    map<KeyFrame*,int,IdLess> KFcounter;
 
     vector<MapPoint*> vpMP;
 
@@ -399,9 +408,9 @@ void KeyFrame::UpdateConnections(bool upParent)
         if(pMP->isBad())
             continue;
 
-        map<KeyFrame*,tuple<int,int>> observations = pMP->GetObservations();
+        map<KeyFrame*,tuple<int,int>,IdLess> observations = pMP->GetObservations();
 
-        for(map<KeyFrame*,tuple<int,int>>::iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
+        for(map<KeyFrame*,tuple<int,int>,IdLess>::iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
         {
             if(mit->first->mnId==mnId || mit->first->isBad() || mit->first->GetMap() != mpMap)
                 continue;
@@ -446,7 +455,15 @@ void KeyFrame::UpdateConnections(bool upParent)
         pKFmax->AddConnection(this,nmax);
     }
 
-    sort(vPairs.begin(),vPairs.end());
+    sort(vPairs.begin(), vPairs.end(),
+         [](const pair<int,KeyFrame*>& left, const pair<int,KeyFrame*>& right)
+         {
+             if (left.first != right.first)
+             {
+                 return left.first < right.first;
+             }
+             return left.second->mnId < right.second->mnId;  // deterministic tie-break (was pointer order)
+         });
     list<KeyFrame*> lKFs;
     list<int> lWs;
     for(size_t i=0; i<vPairs.size();i++)
@@ -498,7 +515,7 @@ void KeyFrame::ChangeParent(KeyFrame *pKF)
     pKF->AddChild(this);
 }
 
-set<KeyFrame*> KeyFrame::GetChilds()
+set<KeyFrame*, IdLess> KeyFrame::GetChilds()
 {
     unique_lock<mutex> lockCon(mMutexConnections);
     return mspChildrens;
@@ -529,7 +546,7 @@ void KeyFrame::AddLoopEdge(KeyFrame *pKF)
     mspLoopEdges.insert(pKF);
 }
 
-set<KeyFrame*> KeyFrame::GetLoopEdges()
+set<KeyFrame*, IdLess> KeyFrame::GetLoopEdges()
 {
     unique_lock<mutex> lockCon(mMutexConnections);
     return mspLoopEdges;
@@ -542,7 +559,7 @@ void KeyFrame::AddMergeEdge(KeyFrame* pKF)
     mspMergeEdges.insert(pKF);
 }
 
-set<KeyFrame*> KeyFrame::GetMergeEdges()
+set<KeyFrame*, IdLess> KeyFrame::GetMergeEdges()
 {
     unique_lock<mutex> lockCon(mMutexConnections);
     return mspMergeEdges;
@@ -844,7 +861,7 @@ void KeyFrame::UpdateMap(Map* pMap)
     mpMap = pMap;
 }
 
-void KeyFrame::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP, set<GeometricCamera*>& spCam)
+void KeyFrame::PreSave(set<KeyFrame*, IdLess>& spKF,set<MapPoint*, IdLess>& spMP, set<GeometricCamera*>& spCam)
 {
     // Save the id of each MapPoint in this KF, there can be null pointer in the vector
     mvBackupMapPointsId.clear();

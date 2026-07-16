@@ -56,6 +56,12 @@ ENDIF(OPENMP_FOUND AND G2O_USE_OPENMP)
 # Compiler specific options for gcc
 SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
 SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
+
+# Determinism: Eigen's vectorized reductions peel loops to ALIGNMENT BOUNDARIES of heap
+# pointers, and heap addresses are not reproducible run-to-run (measured, ASLR off) -> the
+# floating-point summation split varies -> last-bit result differences -> run-to-run
+# divergence. Scalar Eigen code paths are address-independent. Alignment/ABI unchanged.
+add_definitions(-DEIGEN_DONT_VECTORIZE)
 # SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
 # SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3")
 

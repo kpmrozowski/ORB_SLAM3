@@ -17,6 +17,7 @@
 */
 
 
+#include "DeterministicOrder.h"
 #include "ORBmatcher.h"
 
 #include<limits.h>
@@ -1350,7 +1351,7 @@ namespace ORB_SLAM3
         Eigen::Vector3f Ow = Tcw.inverse().translation();
 
         // Set of MapPoints already found in the KeyFrame
-        const set<MapPoint*> spAlreadyFound = pKF->GetMapPoints();
+        const set<MapPoint*, IdLess> spAlreadyFound = pKF->GetMapPoints();
 
         int nFused=0;
 

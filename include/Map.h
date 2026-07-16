@@ -20,6 +20,7 @@
 #ifndef MAP_H
 #define MAP_H
 
+#include "DeterministicOrder.h"
 #include "MapPoint.h"
 #include "KeyFrame.h"
 
@@ -159,8 +160,8 @@ protected:
 
     long unsigned int mnId;
 
-    std::set<MapPoint*> mspMapPoints;
-    std::set<KeyFrame*> mspKeyFrames;
+    std::set<MapPoint*, IdLess> mspMapPoints;
+    std::set<KeyFrame*, IdLess> mspKeyFrames;
 
     // Save/load, the set structure is broken in libboost 1.58 for ubuntu 16.04, a vector is serializated
     std::vector<MapPoint*> mvpBackupMapPoints;

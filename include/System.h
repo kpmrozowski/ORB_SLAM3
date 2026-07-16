@@ -234,6 +234,9 @@ private:
     FrameDrawer* mpFrameDrawer;
     MapDrawer* mpMapDrawer;
 
+    // Deterministic sequential mode (env ORB_DETERMINISTIC)
+    bool mbDeterministic = false;
+
     // System threads: Local Mapping, Loop Closing, Viewer.
     // The Tracking thread "lives" in the main execution thread that creates the System object.
     std::thread* mptLocalMapping;
