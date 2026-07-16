@@ -247,19 +247,19 @@ void LoopClosing::Run()
                         if (fabs(phi(0))<loopRpTol && fabs(phi(1))<loopRpTol && fabs(phi(2))<loopYawTol)
                         {
                             cout << "GOOD LOOP accepted (RpTol=" << loopRpTol << " YawTol=" << loopYawTol << ")" << endl;
-                            if(mpCurrentKF->GetMap()->IsInertial())
-                            {
-                                // If inertial, force only yaw
-                                if ((mpTracker->mSensor==System::IMU_MONOCULAR ||mpTracker->mSensor==System::IMU_STEREO || mpTracker->mSensor==System::IMU_RGBD) &&
-                                        mpCurrentKF->GetMap()->GetIniertialBA2())
-                                {
-                                    phi(0)=0;
-                                    phi(1)=0;
-                                    g2oSww_new = g2o::Sim3(ExpSO3(phi),g2oSww_new.translation(),1.0);
-                                    mg2oLoopScw = g2oTwc.inverse()*g2oSww_new;
-                                }
-                            }
-
+                            // 4-DoF roll/pitch lock: gravity is observable in any inertial map, so a
+                            // loop correction must never rotate the world off the IMU vertical.
+                            // Applied UNCONDITIONALLY on accept — upstream additionally gated this on
+                            // sensor type + GetIniertialBA2(); loop detection already requires VIBA2
+                            // (NewDetectCommonRegions early-return), but the lock must not depend on
+                            // that coupling. Scale stays 1 (inertial scale trusted); downstream stays
+                            // 4-DoF too (OptimizeEssentialGraph4DoF + FullInertialBA GBA).
+                            phi(0)=0;
+                            phi(1)=0;
+                            g2oSww_new = g2o::Sim3(ExpSO3(phi),g2oSww_new.translation(),1.0);
+                            mg2oLoopScw = g2oTwc.inverse()*g2oSww_new;
+                            cout << "[4DoF] loop correction locked to yaw=" << phi(2)
+                                 << " rad; roll/pitch discarded" << endl;
                         }
                         else
                         {
