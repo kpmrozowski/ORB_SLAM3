@@ -45,6 +45,10 @@ public:
     Eigen::Matrix4f iterate(int nIterations, bool &bNoMore, vector<bool> &vbInliers, int &nInliers, bool &bConverge);
 
     Eigen::Matrix4f GetEstimatedTransformation();
+
+    // usable 3D-3D correspondences after the both-sides-have-map-points filter (PR debug)
+    int GetNumCorrespondences() { return static_cast<int>(mvpMapPoints1.size()); }
+    int GetBestInliers() { return mnBestInliers; }
     Eigen::Matrix3f GetEstimatedRotation();
     Eigen::Vector3f GetEstimatedTranslation();
     float GetEstimatedScale();

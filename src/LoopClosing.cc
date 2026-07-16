@@ -761,7 +761,9 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
             if (prDebugBow)
             {
                 std::cout << "PRDBG     sim3 converge=" << bConverge << " inliers=" << nInliers
-                          << std::endl;
+                          << " N=" << solver.GetNumCorrespondences()
+                          << " bestInl=" << solver.GetBestInliers()
+                          << " fixScale=" << bFixedScale << std::endl;
             }
             if(bConverge)
             {
