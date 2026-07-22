@@ -1404,6 +1404,16 @@ double System::GetTimeFromIMUInit()
         return 0.f;
 }
 
+bool System::isDiverged()
+{
+    return mbDiverged.load();
+}
+
+void System::SetDiverged()
+{
+    mbDiverged.store(true);
+}
+
 bool System::isLost()
 {
     if (!mpAtlas->isImuInitialized())

@@ -207,6 +207,12 @@ int main(int argc, char *argv[])
             // cout << "tframe = " << tframe << endl;
             SLAM.TrackMonocular(im,tframe,vImuMeas); // TODO change to monocular_inertial
 
+            if(SLAM.isDiverged())
+            {
+                cout << "[DIVERGE] stopping sequence early at frame " << ni << endl;
+                break;
+            }
+
     #ifdef COMPILEDWITHC11
             std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
     #else

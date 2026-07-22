@@ -21,6 +21,7 @@
 #define SYSTEM_H
 
 
+#include <atomic>
 #include <unistd.h>
 #include<stdio.h>
 #include<stdlib.h>
@@ -182,6 +183,11 @@ public:
     bool isLost();
     bool isFinished();
 
+    // Early-divergence guard (ORB_DIVERGE_VMAX/COUNT, set from LocalMapping): the example
+    // binaries poll this to stop feeding frames and save the partial trajectory.
+    bool isDiverged();
+    void SetDiverged();
+
     void ChangeDataset();
 
     float GetImageScale();
@@ -197,6 +203,8 @@ public:
 #endif
 
 private:
+
+    std::atomic<bool> mbDiverged{false};
 
     void SaveAtlas(int type);
     bool LoadAtlas(int type);

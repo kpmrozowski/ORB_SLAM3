@@ -99,6 +99,21 @@ static float ImuViba2S()
         getenv("ORB_IMU_VIBA2_S") ? atof(getenv("ORB_IMU_VIBA2_S")) : 15.0f;
     return value;
 }
+// Early-divergence guard: after IMU init, ORB_DIVERGE_COUNT consecutive keyframes with
+// |velocity| above ORB_DIVERGE_VMAX m/s mark the run as diverged (the example binaries
+// then stop feeding frames and save whatever trajectory exists). Off unless VMAX is set.
+static float DivergeVmax()
+{
+    static const float value =
+        getenv("ORB_DIVERGE_VMAX") ? atof(getenv("ORB_DIVERGE_VMAX")) : 0.0f;
+    return value;
+}
+static int DivergeCountThreshold()
+{
+    static const int value =
+        getenv("ORB_DIVERGE_COUNT") ? atoi(getenv("ORB_DIVERGE_COUNT")) : 0;
+    return value > 0 ? value : 4;
+}
 
 static void DetPrintMapFingerprint(Atlas* pAtlas, KeyFrame* pKF, const char* stage)
 {
@@ -448,6 +463,29 @@ void LocalMapping::ProcessNewKeyFrame()
 
     // Insert Keyframe in Map
     mpAtlas->AddKeyFrame(mpCurrentKeyFrame);
+
+    if (DivergeVmax() > 0.0f && mpAtlas->isImuInitialized())
+    {
+        static int consecutive_high_velocity_keyframes = 0;
+        const float keyframe_speed = mpCurrentKeyFrame->GetVelocity().norm();
+        if (keyframe_speed > DivergeVmax())
+        {
+            ++consecutive_high_velocity_keyframes;
+            if (consecutive_high_velocity_keyframes >= DivergeCountThreshold())
+            {
+                std::cout << "[DIVERGE] " << consecutive_high_velocity_keyframes
+                          << " consecutive KFs with |v| > " << DivergeVmax()
+                          << " m/s (last " << keyframe_speed << " m/s, KF "
+                          << mpCurrentKeyFrame->mnId << ") - flagging run as diverged"
+                          << std::endl;
+                mpSystem->SetDiverged();
+            }
+        }
+        else
+        {
+            consecutive_high_velocity_keyframes = 0;
+        }
+    }
 }
 
 void LocalMapping::EmptyQueue()
