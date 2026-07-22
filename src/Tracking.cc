@@ -2513,6 +2513,23 @@ void Tracking::StereoInitialization()
 }
 
 
+
+// Monocular-initialization match gates (env; stock 100/100px). In-flight motion blur on the
+// fast circle keeps consecutive-pair matches below 100 permanently - initialization silently
+// never retries once airborne.
+static int MInitMinMatches()
+{
+    static const int value =
+        getenv("ORB_MINIT_MINMATCHES") ? atoi(getenv("ORB_MINIT_MINMATCHES")) : 100;
+    return value;
+}
+static int MInitWindowPx()
+{
+    static const int value =
+        getenv("ORB_MINIT_WINDOW_PX") ? atoi(getenv("ORB_MINIT_WINDOW_PX")) : 100;
+    return value;
+}
+
 void Tracking::MonocularInitialization()
 {
 
@@ -2557,10 +2574,15 @@ void Tracking::MonocularInitialization()
 
         // Find correspondences
         ORBmatcher matcher(0.9,true);
-        int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,100);
+        int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,MInitWindowPx());
 
+        if (getenv("ORB_DET_DEBUG"))
+        {
+            printf("DETMINIT t=%.3f dt=%.3f nmatches=%d\n", mCurrentFrame.mTimeStamp,
+                   mCurrentFrame.mTimeStamp - mInitialFrame.mTimeStamp, nmatches);
+        }
         // Check if there are enough correspondences
-        if(nmatches<100)
+        if(nmatches<MInitMinMatches())
         {
             mbReadyToInitializate = false;
             return;
@@ -2569,7 +2591,12 @@ void Tracking::MonocularInitialization()
         Sophus::SE3f Tcw;
         vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
 
-        if(mpCamera->ReconstructWithTwoViews(mInitialFrame.mvKeysUn,mCurrentFrame.mvKeysUn,mvIniMatches,Tcw,mvIniP3D,vbTriangulated))
+        const bool bRecon = mpCamera->ReconstructWithTwoViews(mInitialFrame.mvKeysUn,mCurrentFrame.mvKeysUn,mvIniMatches,Tcw,mvIniP3D,vbTriangulated);
+        if (getenv("ORB_DET_DEBUG"))
+        {
+            printf("DETMINIT recon=%d\n", (int)bRecon);
+        }
+        if(bRecon)
         {
             for(size_t i=0, iend=mvIniMatches.size(); i<iend;i++)
             {
@@ -3014,6 +3041,18 @@ bool Tracking::TrackWithMotionModel()
         return nmatchesMap>=10;
 }
 
+
+// Minimum TrackLocalMap inliers before IMU initialization (env ORB_TRACK_MININL_PREIMU,
+// stock 50). Fast-rotation flights (20 fps circle) drop below 50 right after the two-view
+// init and the pre-IMU recovery path is a full map reset - a lower floor lets tracking limp
+// through the first seconds until the inertial init takes over (post-init floor stays 15).
+static int TrackMinInliersPreImu()
+{
+    static const int value =
+        getenv("ORB_TRACK_MININL_PREIMU") ? atoi(getenv("ORB_TRACK_MININL_PREIMU")) : 50;
+    return value;
+}
+
 bool Tracking::TrackLocalMap()
 {
 
@@ -3095,7 +3134,7 @@ bool Tracking::TrackLocalMap()
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
-    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
+    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<TrackMinInliersPreImu())
         return false;
 
     if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
@@ -3104,7 +3143,7 @@ bool Tracking::TrackLocalMap()
 
     if (mSensor == System::IMU_MONOCULAR)
     {
-        if((mnMatchesInliers<15 && mpAtlas->isImuInitialized())||(mnMatchesInliers<50 && !mpAtlas->isImuInitialized()))
+        if((mnMatchesInliers<15 && mpAtlas->isImuInitialized())||(mnMatchesInliers<TrackMinInliersPreImu() && !mpAtlas->isImuInitialized()))
         {
             return false;
         }

@@ -29,12 +29,37 @@
 using namespace std;
 namespace ORB_SLAM3
 {
-    TwoViewReconstruction::TwoViewReconstruction(const Eigen::Matrix3f& k, float sigma, int iterations)
+    // Two-view reconstruction acceptance knobs (env-overridable; defaults preserve stock).
+// The stock gates (sigma 1 px, 1 deg min parallax, 90% of matches must triangulate) are tuned
+// for crisp narrow-FoV imagery; motion-blurred fast-rotation fisheye flights (20 fps circle)
+// fail reconstruction on every attempt while matching itself succeeds.
+//   ORB_TVR_SIGMA        RANSAC/chi2 sigma in pixels (stock 1.0)
+//   ORB_TVR_MINPARALLAX  minimum accepted parallax in degrees (stock 1.0)
+//   ORB_TVR_GOODFRAC     fraction of matches that must triangulate (stock 0.9)
+static float TvrSigma(const float fallback)
+{
+    static const float value = getenv("ORB_TVR_SIGMA") ? atof(getenv("ORB_TVR_SIGMA")) : 0.0f;
+    return value > 0.0f ? value : fallback;
+}
+static float TvrMinParallax()
+{
+    static const float value =
+        getenv("ORB_TVR_MINPARALLAX") ? atof(getenv("ORB_TVR_MINPARALLAX")) : 1.0f;
+    return value;
+}
+static float TvrGoodFrac()
+{
+    static const float value =
+        getenv("ORB_TVR_GOODFRAC") ? atof(getenv("ORB_TVR_GOODFRAC")) : 0.9f;
+    return value;
+}
+
+TwoViewReconstruction::TwoViewReconstruction(const Eigen::Matrix3f& k, float sigma, int iterations)
     {
         mK = k;
 
-        mSigma = sigma;
-        mSigma2 = sigma*sigma;
+        mSigma = TvrSigma(sigma);
+        mSigma2 = mSigma*mSigma;
         mMaxIterations = iterations;
     }
 
@@ -113,7 +138,7 @@ namespace ORB_SLAM3
         if(SH+SF == 0.f) return false;
         float RH = SH/(SH+SF);
 
-        float minParallax = 1.0;
+        float minParallax = TvrMinParallax();
 
         // Try to reconstruct from homography or fundamental depending on the ratio (0.40-0.45)
         if(RH>0.50) // if(RH>0.40)
@@ -504,7 +529,7 @@ namespace ORB_SLAM3
 
         int maxGood = max(nGood1,max(nGood2,max(nGood3,nGood4)));
 
-        int nMinGood = max(static_cast<int>(0.9*N),minTriangulated);
+        int nMinGood = max(static_cast<int>(TvrGoodFrac()*N),minTriangulated);
 
         int nsimilar = 0;
         if(nGood1>0.7*maxGood)
@@ -722,7 +747,7 @@ namespace ORB_SLAM3
         }
 
 
-        if(secondBestGood<0.75*bestGood && bestParallax>=minParallax && bestGood>minTriangulated && bestGood>0.9*N)
+        if(secondBestGood<0.75*bestGood && bestParallax>=minParallax && bestGood>minTriangulated && bestGood>TvrGoodFrac()*N)
         {
             T21 = Sophus::SE3f(vR[bestSolutionIdx], vt[bestSolutionIdx]);
             vbTriangulated = bestTriangulated;
