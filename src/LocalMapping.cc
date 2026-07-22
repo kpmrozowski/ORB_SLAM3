@@ -67,6 +67,39 @@ void LocalMapping::SetTracker(Tracking *pTracker)
 /** One full pass of the mapping work for a single queued keyframe — the body of Run()'s
  *  main branch, shared with the deterministic sequential mode. */
 
+// Inertial-initialization schedule knobs (env-overridable; defaults preserve stock).
+// Short flights (e.g. the 14-s circle hop) cannot satisfy the stock schedule: first init needs
+// nMinKF KFs over minTime seconds, VIBA1/VIBA2 fire at fixed mTinit marks, and a low-motion
+// guard resets the map during the pre-flight hover. All four gates scale together here.
+//   ORB_IMU_INIT_MINTIME  first-init minimum KF-span seconds (stock 2.0 mono / 1.0 stereo)
+//   ORB_IMU_INIT_MINKF    first-init minimum keyframes (stock 10)
+//   ORB_IMU_VIBA1_S       VIBA1 mTinit mark (stock 5.0)
+//   ORB_IMU_VIBA2_S       VIBA2 mTinit mark (stock 15.0)
+static float ImuInitMinTime(const float fallback)
+{
+    static const float value =
+        getenv("ORB_IMU_INIT_MINTIME") ? atof(getenv("ORB_IMU_INIT_MINTIME")) : 0.0f;
+    return value > 0.0f ? value : fallback;
+}
+static int ImuInitMinKF(const int fallback)
+{
+    static const int value =
+        getenv("ORB_IMU_INIT_MINKF") ? atoi(getenv("ORB_IMU_INIT_MINKF")) : 0;
+    return value > 0 ? value : fallback;
+}
+static float ImuViba1S()
+{
+    static const float value =
+        getenv("ORB_IMU_VIBA1_S") ? atof(getenv("ORB_IMU_VIBA1_S")) : 5.0f;
+    return value;
+}
+static float ImuViba2S()
+{
+    static const float value =
+        getenv("ORB_IMU_VIBA2_S") ? atof(getenv("ORB_IMU_VIBA2_S")) : 15.0f;
+    return value;
+}
+
 static void DetPrintMapFingerprint(Atlas* pAtlas, KeyFrame* pKF, const char* stage)
 {
     if (!getenv("ORB_DET_DEBUG"))
@@ -165,7 +198,7 @@ void LocalMapping::ProcessQueueOnce()
                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                         {
-                            if((mTinit<10.f) && (dist<0.02))
+                            if((mTinit < ImuViba2S() * (10.0f / 15.0f)) && (dist<0.02))
                             {
                                 cout << "Not enough motion for initializing. Reseting..." << endl;
                                 unique_lock<mutex> lock(mMutexReset);
@@ -232,7 +265,7 @@ void LocalMapping::ProcessQueueOnce()
                     if(mpCurrentKeyFrame->GetMap()->isImuInitialized() && mpTracker->mState==Tracking::OK) // Enter here everytime local-mapping is called
                     {
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA1()){
-                            if (mTinit>5.0f)
+                            if (mTinit>ImuViba1S())
                             {
                                 cout << "start VIBA 1" << endl;
                                 mpCurrentKeyFrame->GetMap()->SetIniertialBA1();
@@ -245,7 +278,7 @@ void LocalMapping::ProcessQueueOnce()
                             }
                         }
                         else if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2()){
-                            if (mTinit>15.0f){
+                            if (mTinit>ImuViba2S()){
                                 cout << "start VIBA 2" << endl;
                                 mpCurrentKeyFrame->GetMap()->SetIniertialBA2();
                                 if (mbMonocular)
@@ -1287,13 +1320,13 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     int nMinKF;
     if (mbMonocular)
     {
-        minTime = 2.0;
-        nMinKF = 10;
+        minTime = ImuInitMinTime(2.0f);
+        nMinKF = ImuInitMinKF(10);
     }
     else
     {
-        minTime = 1.0;
-        nMinKF = 10;
+        minTime = ImuInitMinTime(1.0f);
+        nMinKF = ImuInitMinKF(10);
     }
 
 
