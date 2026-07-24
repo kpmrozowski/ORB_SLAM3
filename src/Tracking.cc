@@ -40,8 +40,10 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <opencv2/calib3d.hpp>
+#include <opencv2/features2d.hpp>
 
 #include "BaroFusion.h"
 
@@ -1622,8 +1624,11 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
 namespace
 {
 // Defined in the IC env-helper block just above Tracking::MonocularInitialization; GrabImageMonocular
-// (below) needs it earlier. Anonymous namespaces merge within a TU, so this forward declaration binds.
+// (below) needs them earlier. Anonymous namespaces merge within a TU, so these forward declarations bind.
 bool ICTrackEnabled();
+bool ICCascadeEnabled();
+bool ICCascadeRescueEnabled();
+double ICCascadePriorMinTrans();
 }  // namespace
 
 Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
@@ -1684,9 +1689,21 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
     lastID = mCurrentFrame.mnId;
     Track();
 
-    // Retain this frame's gray as the previous image for the next frame's IC TWMM gate (id-sentinel
-    // guards staleness; Track() has already set mLastFrame = Frame(mCurrentFrame)).
-    if (ICTrackEnabled() && (mSensor == System::MONOCULAR || mSensor == System::IMU_MONOCULAR))
+    // Flush this frame's cascade telemetry (one CASC row) now that Track() has resolved the final state —
+    // so a rescue attempt is logged as success ('R') / attempt ('r') correctly. Count rescue successes
+    // regardless of debug logging (the run summary reports them).
+    if (mICCascade.computed)
+    {
+        if ((mICCascade.consumed & 4) && mState == OK)
+        {
+            ++mnICRescueSuccesses;
+        }
+        ICWriteCascadeRow();
+    }
+
+    // Retain this frame's gray as the previous image for the next frame's IC TWMM gate / cascade
+    // (id-sentinel guards staleness; Track() has already set mLastFrame = Frame(mCurrentFrame)).
+    if ((ICTrackEnabled() || ICCascadeEnabled()) && (mSensor == System::MONOCULAR || mSensor == System::IMU_MONOCULAR))
     {
         mImICLastGray = mImGray.clone();
         mnICLastFrameId = static_cast<long long>(mCurrentFrame.mnId);
@@ -2077,6 +2094,36 @@ void Tracking::Track()
                             PredictStateIMU();
                         else
                             bOK = false;
+
+                        // ORB_IC_CASCADE_RESCUE: before conceding a pre-IMU-init recently-lost frame, seed a
+                        // pose from the last frame via the H_best decomposition so the TrackLocalMap below can
+                        // re-lock. Fail-open: on failure bOK stays false and the stock lost path resumes.
+                        if (!bOK && ICCascadeEnabled() && ICCascadeRescueEnabled() && !pCurrentMap->isImuInitialized()
+                            && (mSensor == System::IMU_MONOCULAR || mSensor == System::MONOCULAR) && mLastFrame.isSet()
+                            && ComputeICCascade(false) && mICCascade.has_plane)
+                        {
+                            const ICPoseDelta delta = ICDecomposeHomographyToPose(
+                                mICCascade.h_best, mICCascade.intrinsic, mICCascade.rotation_c2_c1,
+                                mICCascade.plane_normal_c1);
+                            if (delta.ok)
+                            {
+                                Eigen::Vector3f predictedTranslation = Eigen::Vector3f::Zero();
+                                if (mbVelocity && delta.translation_over_depth > ICCascadePriorMinTrans())
+                                {
+                                    predictedTranslation = mVelocity.translation().norm() * delta.unit_translation_c2.cast<float>();
+                                }
+                                else if (mbVelocity)
+                                {
+                                    predictedTranslation = mVelocity.translation();
+                                }
+                                const Eigen::Quaternionf rotation(delta.rotation_c2_c1.cast<float>());
+                                const Sophus::SE3f relativePose(Sophus::SO3f(rotation.normalized()), predictedTranslation);
+                                mCurrentFrame.SetPose(relativePose * mLastFrame.GetPose());
+                                bOK = true;
+                                mICCascade.consumed |= 4;
+                                ++mnICRescueAttempts;
+                            }
+                        }
 
                         if (mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
                         {
@@ -2585,6 +2632,21 @@ int ICTrackGnIters() { static const int value = ICEnvInt("ORB_IC_TRACK_GN_ITERS"
 double ICGateFloor() { static const double value = ICEnvDouble("ORB_IC_GATE_FLOOR", 0.5); return value; }
 double ICGateMargin() { static const double value = ICEnvDouble("ORB_IC_GATE_MARGIN", 0.05); return value; }
 double ICMaxDt() { static const double value = ICEnvDouble("ORB_IC_MAX_DT", 1.0); return value; }
+
+// --- The constructive cascade (ORB_IC_CASCADE): master flag + independently tunable consumers. ---
+bool ICCascadeEnabled() { static const bool value = ICEnvFlag("ORB_IC_CASCADE"); return value; }
+bool ICCascadePriorEnabled() { static const bool value = ICEnvFlag("ORB_IC_CASCADE_PRIOR"); return value; }
+bool ICCascadeGuideEnabled() { static const bool value = ICEnvFlag("ORB_IC_CASCADE_GUIDE"); return value; }
+bool ICCascadeRescueEnabled() { static const bool value = ICEnvFlag("ORB_IC_CASCADE_RESCUE"); return value; }
+bool ICCascadeInitFilterEnabled() { static const bool value = ICEnvFlag("ORB_IC_CASCADE_INITFILTER"); return value; }
+// IC ZNCC below which the lazy ORB rung is computed (day flights should escalate rarely, dusk often).
+double ICCascadeEscalateEcc() { static const double value = ICEnvDouble("ORB_IC_ESCALATE_ECC", 0.6); return value; }
+double ICCascadeLoweRatio() { static const double value = ICEnvDouble("ORB_IC_ESCALATE_LOWE", 0.75); return value; }
+// Guided-search window radius (px). <=0 means "match the stock th window" (handled at the call site).
+double ICCascadeGuideRadius() { static const double value = ICEnvDouble("ORB_IC_GUIDE_RADIUS", -1.0); return value; }
+// A recovered H-translation whose |t|/d clears this is trusted for the prior's translation DIRECTION;
+// below it the prior keeps the map-scale velocity translation (rotation-dominated pair).
+double ICCascadePriorMinTrans() { static const double value = ICEnvDouble("ORB_IC_PRIOR_MIN_TRANS", 0.02); return value; }
 bool ICGateRelative()
 {
     static const bool value = []() -> bool
@@ -2701,8 +2763,10 @@ void ICOpenStatsIfNeeded(std::ofstream& file, bool& header_written)
     file.open(std::string(dir) + "/ic_stats.csv", std::ios::out | std::ios::trunc);
     if (file.is_open() && !header_written)
     {
+        // v2: `escalated`/`consumed` appended for kind=CASC rows (legacy INIT/TRACK write 0/`-`).
+        // Column-name parsers stay backward compatible; the new columns are always the last two.
         file << "kind,frame_ref,frame_cur,t_ref,t_cur,n_matches,seed_src,used_seed_zncc,ecc_seed_rot,"
-                "ecc_seed_full,ecc_ic,ecc_orb,ensemble_winner,gate,invalidated,survivors,ms\n";
+                "ecc_seed_full,ecc_ic,ecc_orb,ensemble_winner,gate,invalidated,survivors,ms,escalated,consumed\n";
         header_written = true;
     }
 }
@@ -2917,7 +2981,7 @@ void Tracking::ICFilterInitMatches(int& nmatches)
                          << matchIndex.size() << "," << ICSeedSourceLabel(seed.source) << "," << seed.used_seed_zncc
                          << "," << seed.zncc_rotation_only << "," << seed.zncc_full << "," << correlationIc << ","
                          << correlationOrb << "," << ensembleWinner << "," << gateLabel << "," << invalidated << ","
-                         << survivors << "," << icMs << "\n";
+                         << survivors << "," << icMs << ",0,-\n";
             mICStatsFile.flush();
         }
         fprintf(stderr,
@@ -3075,7 +3139,7 @@ void Tracking::ICFilterTrackMatches(int& nmatches)
                          << std::setprecision(6) << mLastFrame.mTimeStamp << "," << mCurrentFrame.mTimeStamp << ","
                          << matched << "," << ICSeedSourceLabel(seed.source) << "," << seed.used_seed_zncc << ","
                          << seed.zncc_rotation_only << "," << seed.zncc_full << "," << correlationIc << ",-1,none,"
-                         << gateLabel << "," << invalidated << "," << survivors << "," << icMs << "\n";
+                         << gateLabel << "," << invalidated << "," << survivors << "," << icMs << ",0,-\n";
             mICStatsFile.flush();
         }
         fprintf(stderr,
@@ -3083,6 +3147,409 @@ void Tracking::ICFilterTrackMatches(int& nmatches)
                 mCurrentFrame.mTimeStamp, dtSec, matched, ICSeedSourceLabel(seed.source), seed.used_seed_zncc,
                 correlationIc, gateLabel, invalidated, matched, icMs);
     }
+}
+
+// ============================ THE CASCADE (ORB_IC_CASCADE) ============================
+// IMU seed family -> IC dense refine -> LAZY ORB escalation -> winner H_best, then consumed
+// CONSTRUCTIVELY (pose prior / guided search / lost-rescue) rather than by rejecting matches.
+// Every step is fail-open: any missing ingredient leaves the frame on the stock code path.
+
+void Tracking::CollectInitMatchPointsUndistorted(std::vector<cv::Point2f>& refUn, std::vector<cv::Point2f>& curUn) const
+{
+    std::vector<cv::Point2f> referenceRaw, currentRaw;
+    for (size_t index = 0; index < mvIniMatches.size(); ++index)
+    {
+        if (mvIniMatches[index] < 0)
+        {
+            continue;
+        }
+        referenceRaw.push_back(mInitialFrame.mvKeys[index].pt);
+        currentRaw.push_back(mCurrentFrame.mvKeys[mvIniMatches[index]].pt);
+    }
+    if (referenceRaw.empty())
+    {
+        return;
+    }
+    refUn = mpICUndistorter->UndistortPoints(referenceRaw);
+    curUn = mpICUndistorter->UndistortPoints(currentRaw);
+}
+
+void Tracking::ComputeOrbBfMatchesUndistorted(const Frame& refFrame, std::vector<cv::Point2f>& refUn,
+                                              std::vector<cv::Point2f>& curUn) const
+{
+    if (refFrame.mDescriptors.empty() || mCurrentFrame.mDescriptors.empty())
+    {
+        return;
+    }
+    cv::BFMatcher matcher(cv::NORM_HAMMING, false);
+    std::vector<std::vector<cv::DMatch>> knnMatches;
+    matcher.knnMatch(refFrame.mDescriptors, mCurrentFrame.mDescriptors, knnMatches, 2);
+    const double loweRatio = ICCascadeLoweRatio();
+    std::vector<cv::Point2f> referenceRaw, currentRaw;
+    for (const std::vector<cv::DMatch>& candidate : knnMatches)
+    {
+        if (candidate.size() < 2)
+        {
+            continue;
+        }
+        if (candidate[0].distance < loweRatio * candidate[1].distance)
+        {
+            referenceRaw.push_back(refFrame.mvKeys[candidate[0].queryIdx].pt);
+            currentRaw.push_back(mCurrentFrame.mvKeys[candidate[0].trainIdx].pt);
+        }
+    }
+    if (referenceRaw.empty())
+    {
+        return;
+    }
+    refUn = mpICUndistorter->UndistortPoints(referenceRaw);
+    curUn = mpICUndistorter->UndistortPoints(currentRaw);
+}
+
+bool Tracking::ComputeICCascade(const bool isInit)
+{
+    mICCascade = ICCascadeResult();
+    mICCascade.kind = isInit ? 'I' : 'T';
+
+    if (mSensor != System::MONOCULAR && mSensor != System::IMU_MONOCULAR)
+    {
+        return false;
+    }
+    const cv::Mat& referenceGray = isInit ? mImICInitGray : mImICLastGray;
+    const long long referenceId = isInit ? mnICInitFrameId : mnICLastFrameId;
+    const long long expectedId =
+        isInit ? static_cast<long long>(mInitialFrame.mnId) : static_cast<long long>(mLastFrame.mnId);
+    if (referenceGray.empty() || referenceId != expectedId)
+    {
+        return false;
+    }
+    if (mImGray.empty() || mImGray.size() != referenceGray.size() || !EnsureICUndistorter(mImGray.size()))
+    {
+        return false;
+    }
+
+    ICSeedInput seedInput;
+    double dtSec = 0.0;
+    if (!BuildICSeedInput(isInit, seedInput, dtSec) || dtSec <= 0.0 || dtSec > ICMaxDt())
+    {
+        return false;  // dt-gap guard / no gyro seed -> stock path (fail open)
+    }
+
+    const cv::Mat1b undistortedRef = mpICUndistorter->UndistortImage(referenceGray);
+    const cv::Mat1b undistortedCur = mpICUndistorter->UndistortImage(mImGray);
+    const ICSeedResult seed = ICBuildSeed(seedInput, undistortedRef, undistortedCur);
+    if (seed.source == ICSeedSource::Failed)
+    {
+        return false;
+    }
+
+    // Rung 2: IC dense refinement of the best IMU seed.
+    ICStopCriteria criteria;
+    criteria.gauss_iterations = isInit ? ICInitGaussIters() : ICTrackGaussIters();
+    criteria.gauss_newton_iterations = isInit ? ICInitGnIters() : ICTrackGnIters();
+    const std::chrono::steady_clock::time_point cascadeStart = std::chrono::steady_clock::now();
+    cv::Mat1d refinedHomography;
+    double correlationIc = -1.0;
+    std::tie(correlationIc, refinedHomography) =
+        mpICEngine->Refine(undistortedRef, undistortedCur, seed.homography, criteria);
+
+    cv::Mat1d homographyBest = refinedHomography;
+    double correlationBest = correlationIc;
+    char winner = 'i';
+    double correlationOrb = -1.0;
+    bool escalated = false;
+    int matchPairs = 0;
+
+    // Rung 3: LAZY ORB escalation — only when IC is weak/failed. Compute BF+Lowe matches (init: the
+    // existing mvIniMatches; track: descriptors already in both frames), fit H_orb, keep the higher ZNCC.
+    if (correlationIc < ICCascadeEscalateEcc())
+    {
+        escalated = true;
+        std::vector<cv::Point2f> refUn, curUn;
+        if (isInit)
+        {
+            CollectInitMatchPointsUndistorted(refUn, curUn);
+        }
+        else
+        {
+            ComputeOrbBfMatchesUndistorted(mLastFrame, refUn, curUn);
+        }
+        matchPairs = static_cast<int>(refUn.size());
+        if (matchPairs >= 8)
+        {
+            cv::Mat inlierMask;
+            const cv::Mat homographyOrb = cv::findHomography(refUn, curUn, cv::RANSAC, 3.0, inlierMask, 2000, 0.995);
+            if (!homographyOrb.empty() && cv::checkRange(homographyOrb))
+            {
+                const cv::Mat1d homographyOrb1d(homographyOrb);
+                correlationOrb = ICCorrelationCoefficient(undistortedRef, undistortedCur, homographyOrb1d, true);
+                if (correlationOrb > correlationBest)
+                {
+                    homographyBest = homographyOrb1d;
+                    correlationBest = correlationOrb;
+                    winner = 'o';
+                }
+            }
+        }
+    }
+    const double cascadeMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cascadeStart).count();
+
+    // Rung 4 gate: TOLERANCE FORM ONLY (the absolute 0.8 min-corr is deliberately removed from the
+    // cascade path). H_best must clear an absolute floor AND stay within a small margin of the trusted seed.
+    const bool gatePass = correlationBest >= ICGateFloor() && correlationBest >= seed.used_seed_zncc - ICGateMargin();
+    if (!gatePass)
+    {
+        winner = 'n';
+    }
+
+    // Keep the previous-pair propagation state alive across cascade pairs (as the legacy TWMM gate did).
+    if (!isInit)
+    {
+        if (gatePass && winner == 'i')
+        {
+            mbICPrevValid = true;
+            mICPrevHomographyGyro = seed.homography_gyro;
+            mICPrevHomographyIc = ICMatToEigen3d(refinedHomography);
+        }
+        else
+        {
+            mbICPrevValid = false;
+        }
+    }
+
+    mICCascade.computed = true;
+    mICCascade.valid = gatePass;
+    mICCascade.h_best = homographyBest.clone();
+    mICCascade.ecc_seed = seed.used_seed_zncc;
+    mICCascade.ecc_ic = correlationIc;
+    mICCascade.ecc_orb = correlationOrb;
+    mICCascade.winner = winner;
+    mICCascade.escalated = escalated;
+    mICCascade.seed_src = seed.source;
+    mICCascade.rotation_c2_c1 = seed.rotation_c2_c1;
+    mICCascade.intrinsic = seedInput.intrinsic;
+    mICCascade.has_plane = seedInput.has_gravity;
+    if (seedInput.has_gravity)
+    {
+        mICCascade.plane_normal_c1 = (seedInput.rotation_cam_body * (-seedInput.up_body)).normalized();
+    }
+    mICCascade.frame_ref = expectedId;
+    mICCascade.frame_cur = static_cast<long long>(mCurrentFrame.mnId);
+    mICCascade.t_ref = isInit ? mInitialFrame.mTimeStamp : mLastFrame.mTimeStamp;
+    mICCascade.t_cur = mCurrentFrame.mTimeStamp;
+    mICCascade.dt = dtSec;
+    mICCascade.ms = cascadeMs;
+    mICCascade.n_matches = matchPairs;
+    return gatePass;
+}
+
+int Tracking::ICGuidedSearchSupplement()
+{
+    if (!mICCascade.valid || !mpICUndistorter)
+    {
+        return 0;
+    }
+    const cv::Matx33d homographyBest = ICToMatx33(mICCascade.h_best);
+    const Eigen::Matrix3d intrinsicInverse = mpICUndistorter->IntrinsicEigen().inverse();
+    const double guideRadiusEnv = ICCascadeGuideRadius();
+
+    // Additive only: never touch map points already matched into the current frame.
+    std::unordered_set<MapPoint*> alreadyMatched;
+    for (int currentIndex = 0; currentIndex < mCurrentFrame.N; ++currentIndex)
+    {
+        MapPoint* mapPoint = mCurrentFrame.mvpMapPoints[currentIndex];
+        if (mapPoint)
+        {
+            alreadyMatched.insert(mapPoint);
+        }
+    }
+
+    std::vector<int> lastIndices;
+    std::vector<cv::Point2f> lastRaw;
+    for (int lastIndex = 0; lastIndex < mLastFrame.N; ++lastIndex)
+    {
+        MapPoint* mapPoint = mLastFrame.mvpMapPoints[lastIndex];
+        if (!mapPoint || mLastFrame.mvbOutlier[lastIndex] || alreadyMatched.count(mapPoint) > 0)
+        {
+            continue;
+        }
+        lastIndices.push_back(lastIndex);
+        lastRaw.push_back(mLastFrame.mvKeys[lastIndex].pt);
+    }
+    if (lastRaw.empty())
+    {
+        return 0;
+    }
+    const std::vector<cv::Point2f> lastUndistorted = mpICUndistorter->UndistortPoints(lastRaw);
+
+    int added = 0;
+    for (size_t queueIndex = 0; queueIndex < lastIndices.size(); ++queueIndex)
+    {
+        const int lastIndex = lastIndices[queueIndex];
+        MapPoint* mapPoint = mLastFrame.mvpMapPoints[lastIndex];
+        // Warp the last-frame pixel through H_best (undistorted P==K domain), then re-project into the
+        // current DISTORTED image via the camera model so the feature grid can be queried around it.
+        const cv::Vec3d mapped = homographyBest * cv::Vec3d(lastUndistorted[queueIndex].x, lastUndistorted[queueIndex].y, 1.0);
+        if (std::abs(mapped[2]) < 1e-9)
+        {
+            continue;
+        }
+        const Eigen::Vector3d bearing = intrinsicInverse * Eigen::Vector3d(mapped[0] / mapped[2], mapped[1] / mapped[2], 1.0);
+        if (!bearing.allFinite() || bearing.z() <= 0.0)
+        {
+            continue;
+        }
+        const Eigen::Vector3f bearingFloat = bearing.cast<float>();
+        const Eigen::Vector2f predicted = mCurrentFrame.mpCamera->project(bearingFloat);
+        if (predicted.x() < mCurrentFrame.mnMinX || predicted.x() > mCurrentFrame.mnMaxX ||
+            predicted.y() < mCurrentFrame.mnMinY || predicted.y() > mCurrentFrame.mnMaxY)
+        {
+            continue;
+        }
+        const int octave = mLastFrame.mvKeys[lastIndex].octave;
+        const float radius =
+            guideRadiusEnv > 0.0 ? static_cast<float>(guideRadiusEnv) : 15.0f * mCurrentFrame.mvScaleFactors[octave];
+        const std::vector<size_t> candidates =
+            mCurrentFrame.GetFeaturesInArea(predicted.x(), predicted.y(), radius, octave - 1, octave + 1);
+        if (candidates.empty())
+        {
+            continue;
+        }
+        const cv::Mat descriptor = mapPoint->GetDescriptor();
+        int bestDistance = 256;
+        int bestIndex = -1;
+        for (const size_t candidateIndex : candidates)
+        {
+            if (mCurrentFrame.mvpMapPoints[candidateIndex])
+            {
+                continue;  // additive: never overwrite an existing match
+            }
+            const int distance = ORBmatcher::DescriptorDistance(descriptor, mCurrentFrame.mDescriptors.row(candidateIndex));
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestIndex = static_cast<int>(candidateIndex);
+            }
+        }
+        if (bestIndex >= 0 && bestDistance <= ORBmatcher::TH_HIGH)
+        {
+            mCurrentFrame.mvpMapPoints[bestIndex] = mapPoint;
+            ++added;
+        }
+    }
+    if (added > 0)
+    {
+        mICCascade.consumed |= 2;
+    }
+    return added;
+}
+
+void Tracking::ICCascadeFilterInit(int& nmatches)
+{
+    if (!mICCascade.valid)
+    {
+        return;
+    }
+    std::vector<int> matchIndex;
+    std::vector<cv::Point2f> referenceRaw, currentRaw;
+    for (size_t index = 0; index < mvIniMatches.size(); ++index)
+    {
+        if (mvIniMatches[index] < 0)
+        {
+            continue;
+        }
+        matchIndex.push_back(static_cast<int>(index));
+        referenceRaw.push_back(mInitialFrame.mvKeys[index].pt);
+        currentRaw.push_back(mCurrentFrame.mvKeys[mvIniMatches[index]].pt);
+    }
+    if (matchIndex.empty())
+    {
+        return;
+    }
+    const std::vector<cv::Point2f> referenceUn = mpICUndistorter->UndistortPoints(referenceRaw);
+    const std::vector<cv::Point2f> currentUn = mpICUndistorter->UndistortPoints(currentRaw);
+    const cv::Matx33d homography = ICToMatx33(mICCascade.h_best);
+    const cv::Matx33d homographyInverse = homography.inv();
+    std::vector<bool> remove(matchIndex.size(), false);
+    int wouldRemove = 0;
+    for (size_t k = 0; k < matchIndex.size(); ++k)
+    {
+        const double error = ICSymmetricTransferError(homography, homographyInverse, referenceUn[k], currentUn[k]);
+        if (error > ICFilterPx())
+        {
+            remove[k] = true;
+            ++wouldRemove;
+        }
+    }
+    const int survivors = static_cast<int>(matchIndex.size()) - wouldRemove;
+    if (survivors < MInitMinMatches())
+    {
+        mICCascade.survivors = static_cast<int>(matchIndex.size());
+        return;  // guard: the filter can never starve initialization
+    }
+    for (size_t k = 0; k < matchIndex.size(); ++k)
+    {
+        if (remove[k])
+        {
+            mvIniMatches[matchIndex[k]] = -1;
+            --nmatches;
+            ++mICCascade.invalidated;
+        }
+    }
+    mICCascade.survivors = survivors;
+    mICCascade.consumed |= 8;
+}
+
+void Tracking::ICWriteCascadeRow()
+{
+    if (!mICCascade.computed || !ICDebugEnabled())
+    {
+        mICCascade.computed = false;
+        return;
+    }
+    // consumed letters: p=prior g=guide r=rescue-attempt R=rescue-success f=init-filter.
+    std::string consumed;
+    if (mICCascade.consumed & 1)
+    {
+        consumed += 'p';
+    }
+    if (mICCascade.consumed & 2)
+    {
+        consumed += 'g';
+    }
+    if (mICCascade.consumed & 4)
+    {
+        consumed += (mState == OK ? 'R' : 'r');
+    }
+    if (mICCascade.consumed & 8)
+    {
+        consumed += 'f';
+    }
+    if (consumed.empty())
+    {
+        consumed = "-";
+    }
+    const std::string winnerStr = mICCascade.winner == 'i' ? "ic" : (mICCascade.winner == 'o' ? "orb" : "none");
+    const char* gateLabel = mICCascade.valid ? "pass" : "floor";
+    ICOpenStatsIfNeeded(mICStatsFile, mbICStatsHeaderWritten);
+    if (mICStatsFile.is_open())
+    {
+        mICStatsFile << "CASC," << mICCascade.frame_ref << "," << mICCascade.frame_cur << "," << std::fixed
+                     << std::setprecision(6) << mICCascade.t_ref << "," << mICCascade.t_cur << ","
+                     << mICCascade.n_matches << "," << ICSeedSourceLabel(mICCascade.seed_src) << ","
+                     << mICCascade.ecc_seed << ",-1,-1," << mICCascade.ecc_ic << "," << mICCascade.ecc_orb << ","
+                     << winnerStr << "," << gateLabel << "," << mICCascade.invalidated << "," << mICCascade.survivors
+                     << "," << mICCascade.ms << "," << (mICCascade.escalated ? 1 : 0) << "," << consumed << "\n";
+        mICStatsFile.flush();
+    }
+    fprintf(stderr,
+            "IC_CASC kind=%c t=%.3f dt=%.3f n=%d seed=%s ecc_seed=%.3f ecc_ic=%.3f ecc_orb=%.3f winner=%s esc=%d "
+            "gate=%s consumed=%s ms=%.1f\n",
+            mICCascade.kind, mICCascade.t_cur, mICCascade.dt, mICCascade.n_matches,
+            ICSeedSourceLabel(mICCascade.seed_src), mICCascade.ecc_seed, mICCascade.ecc_ic, mICCascade.ecc_orb,
+            winnerStr.c_str(), mICCascade.escalated ? 1 : 0, gateLabel, consumed.c_str(), mICCascade.ms);
+    mICCascade.computed = false;
 }
 
 void Tracking::MonocularInitialization()
@@ -3102,8 +3569,8 @@ void Tracking::MonocularInitialization()
 
             fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
 
-            // Retain the init reference gray for the IC match filter (id-sentinel guards staleness).
-            if (ICInitEnabled())
+            // Retain the init reference gray for the IC match filter / cascade (id-sentinel guards staleness).
+            if (ICInitEnabled() || ICCascadeEnabled())
             {
                 mImICInitGray = mImGray.clone();
                 mnICInitFrameId = static_cast<long long>(mInitialFrame.mnId);
@@ -3154,9 +3621,21 @@ void Tracking::MonocularInitialization()
             return;
         }
 
-        // IC init-pair filter: prune ORB false-positive matches via the dense IMU-seeded refinement,
-        // before ReconstructWithTwoViews consumes mvIniMatches. Fail-open; no-op unless ORB_IC_INIT=1.
-        ICFilterInitMatches(nmatches);
+        // Init-pair alignment. Under the cascade, compute H_best for the init pair (logged as a CASC row,
+        // and used by INITFILTER when explicitly enabled — default OFF, since init-time rejection has
+        // historically destabilized these flights). Otherwise the legacy IC init filter (ORB_IC_INIT).
+        // Fail-open in both modes: the survivor guard can never starve initialization.
+        if (ICCascadeEnabled())
+        {
+            if (ComputeICCascade(true) && ICCascadeInitFilterEnabled())
+            {
+                ICCascadeFilterInit(nmatches);
+            }
+        }
+        else
+        {
+            ICFilterInitMatches(nmatches);
+        }
 
         Sophus::SE3f Tcw;
         vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
@@ -3541,13 +4020,39 @@ bool Tracking::TrackWithMotionModel()
         PredictStateIMU();
         return true;
     }
-    else
+
+    // THE CASCADE (pre-IMU-init). Run the IMU->IC->(lazy ORB) chain for this tracked pair; H_best then
+    // feeds a CONSTRUCTIVE pose prior and a guided search below. Fail-open: unavailable => stock path.
+    const bool cascadeReady = ICCascadeEnabled() && !mpAtlas->isImuInitialized() && ComputeICCascade(false);
+
+    // ORB_IC_CASCADE_PRIOR: replace the stale constant-velocity prediction with an H_best-decomposed pose.
+    // Rotation comes from gyro+IC(+ORB) (H_best); translation MAGNITUDE stays map-scale (from mVelocity,
+    // the only metric-consistent magnitude pre-IMU-init) while its DIRECTION is taken from the homography
+    // decomposition when H_best carries a real translation (else the velocity translation is kept).
+    bool priorApplied = false;
+    if (cascadeReady && ICCascadePriorEnabled() && mICCascade.has_plane)
+    {
+        const ICPoseDelta delta = ICDecomposeHomographyToPose(mICCascade.h_best, mICCascade.intrinsic,
+                                                              mICCascade.rotation_c2_c1, mICCascade.plane_normal_c1);
+        if (delta.ok)
+        {
+            const Eigen::Vector3f velocityTranslation = mVelocity.translation();
+            Eigen::Vector3f predictedTranslation = velocityTranslation;
+            if (delta.translation_over_depth > ICCascadePriorMinTrans())
+            {
+                predictedTranslation = velocityTranslation.norm() * delta.unit_translation_c2.cast<float>();
+            }
+            const Eigen::Quaternionf rotation(delta.rotation_c2_c1.cast<float>());
+            const Sophus::SE3f relativePose(Sophus::SO3f(rotation.normalized()), predictedTranslation);
+            mCurrentFrame.SetPose(relativePose * mLastFrame.GetPose());
+            priorApplied = true;
+            mICCascade.consumed |= 1;
+        }
+    }
+    if (!priorApplied)
     {
         mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
     }
-
-
-
 
     fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
 
@@ -3572,10 +4077,20 @@ bool Tracking::TrackWithMotionModel()
 
     }
 
-    // IC frame-rate gate: prune false-positive last-frame map-point matches via the dense IMU-seeded
-    // refinement. Active pre-IMU-init / post-reloc (TWMM early-returns once IMU is initialized). Survivor
-    // floors keep it from ever failing TWMM on its own. Fail-open; no-op unless ORB_IC_TRACK=1.
-    ICFilterTrackMatches(nmatches);
+    // ORB_IC_CASCADE_GUIDE: ADD matches by re-projecting still-unmatched last-frame map points through
+    // H_best and searching a recentered window — helps fast motion instead of rejecting anything.
+    if (cascadeReady && ICCascadeGuideEnabled())
+    {
+        nmatches += ICGuidedSearchSupplement();
+    }
+
+    // Legacy REJECTION gate (ORB_IC_TRACK) only runs OUTSIDE the cascade: the cascade path is
+    // constructive-only (falsified overnight: match rejection destabilizes 5 fps flights). Fail-open;
+    // no-op unless ORB_IC_TRACK=1. Survivor floors keep it from ever failing TWMM on its own.
+    if (!ICCascadeEnabled())
+    {
+        ICFilterTrackMatches(nmatches);
+    }
 
     if(nmatches<20)
     {

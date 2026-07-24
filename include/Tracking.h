@@ -229,6 +229,16 @@ protected:
     bool EnsureICUndistorter(const cv::Size &imageSize);  // lazy build; false + no-retry on unknown cam
     bool BuildICSeedInput(const bool isInit, ICSeedInput &seedInput, double &dtSec) const;
 
+    // --- The cascade (ORB_IC_CASCADE): IMU seed -> IC refine -> lazy ORB escalation -> winner H_best,
+    // consumed CONSTRUCTIVELY (prior / guide / rescue) instead of by rejection. All fail-open. ---
+    bool ComputeICCascade(const bool isInit);  // fills mICCascade; true iff a gate-passing H_best exists
+    int ICGuidedSearchSupplement();            // ORB_IC_CASCADE_GUIDE: additive H_best-warped match pass
+    void ICCascadeFilterInit(int &nmatches);   // ORB_IC_CASCADE_INITFILTER: prune mvIniMatches vs H_best
+    void CollectInitMatchPointsUndistorted(std::vector<cv::Point2f> &refUn, std::vector<cv::Point2f> &curUn) const;
+    void ComputeOrbBfMatchesUndistorted(const Frame &refFrame, std::vector<cv::Point2f> &refUn,
+                                        std::vector<cv::Point2f> &curUn) const;
+    void ICWriteCascadeRow();                  // flush one kind=CASC row for the frame just tracked
+
     bool Relocalization();
 
     void UpdateLocalMap();
@@ -366,6 +376,34 @@ protected:
     Eigen::Matrix3d mICPrevHomographyIc = Eigen::Matrix3d::Identity();
     std::ofstream mICStatsFile;                        // ic_stats.csv under ORB_IC_DEBUG_DIR, opened lazily
     bool mbICStatsHeaderWritten = false;
+
+    // --- Cascade result for the current frame (see ComputeICCascade). One cascade per frame; consumers
+    // (PRIOR/GUIDE/RESCUE/INITFILTER) read it and record what they consumed, then ICWriteCascadeRow logs. ---
+    struct ICCascadeResult
+    {
+        bool computed = false;                         // ComputeICCascade ran this frame (=> log a row)
+        bool valid = false;                            // a gate-passing H_best was produced
+        cv::Mat1d h_best = cv::Mat1d::eye(3, 3);       // chosen ref->cur undistorted-domain (P==K) warp
+        double ecc_seed = -1.0;                        // consistent ZNCC of the used IMU seed
+        double ecc_ic = -1.0;                          // consistent ZNCC after IC refinement
+        double ecc_orb = -1.0;                         // consistent ZNCC of the lazy ORB homography (-1 if none)
+        char winner = 'n';                             // 'i'=ic, 'o'=orb, 'n'=none (gate failed)
+        bool escalated = false;                        // lazy ORB escalation ran
+        int consumed = 0;                              // bitmask 1=prior 2=guide 4=rescue 8=filter
+        ICSeedSource seed_src = ICSeedSource::Failed;
+        Eigen::Matrix3d rotation_c2_c1 = Eigen::Matrix3d::Identity();  // R21 for the pose decomposition
+        Eigen::Matrix3d intrinsic = Eigen::Matrix3d::Identity();      // K (P==K undistorted domain)
+        Eigen::Vector3d plane_normal_c1 = Eigen::Vector3d::Zero();    // ground-plane normal (ref cam)
+        bool has_plane = false;                        // gravity available -> pose decomposition possible
+        char kind = 'T';                               // 'I'=init, 'T'=track, 'R'=rescue (for the CSV/log)
+        long long frame_ref = -1, frame_cur = -1;
+        double t_ref = 0.0, t_cur = 0.0, dt = 0.0, ms = 0.0;
+        int n_matches = 0;                             // ORB match pairs used for escalation (0 if none)
+        int invalidated = 0, survivors = 0;            // INITFILTER bookkeeping (0 for non-filter frames)
+    };
+    ICCascadeResult mICCascade;
+    long long mnICRescueAttempts = 0;                  // cumulative ORB_IC_CASCADE_RESCUE attempts
+    long long mnICRescueSuccesses = 0;                 // rescues where TrackLocalMap then recovered
 
     //Color order (true RGB, false BGR, ignored if grayscale)
     bool mbRGB;
