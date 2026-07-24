@@ -45,6 +45,7 @@ public:
 
     void DrawMapPoints();
     void DrawKeyFrames(const bool bDrawKF, const bool bDrawGraph, const bool bDrawInertialGraph, const bool bDrawOptLba);
+    void DrawGPS(const bool bDrawTraj, const bool bDrawLines);
     void DrawCurrentCamera(pangolin::OpenGlMatrix &Twc);
     void SetCurrentCameraPose(const Sophus::SE3f &Tcw);
     void SetReferenceKeyFrame(KeyFrame *pKF);

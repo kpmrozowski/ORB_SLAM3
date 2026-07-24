@@ -91,6 +91,7 @@ src/Config.cc
 src/Settings.cc
 src/ICAlign.cc
 src/ICSeed.cc
+src/GpsOverlay.cc
 include/System.h
 include/Tracking.h
 include/LocalMapping.h
@@ -122,7 +123,8 @@ include/SerializationUtils.h
 include/Config.h
 include/Settings.h
 include/ICAlign.h
-include/ICSeed.h)
+include/ICSeed.h
+include/GpsOverlay.h)
 
 add_subdirectory(Thirdparty/g2o)
 

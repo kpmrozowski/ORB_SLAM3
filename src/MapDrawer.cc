@@ -20,6 +20,7 @@
 #include "MapDrawer.h"
 #include "MapPoint.h"
 #include "KeyFrame.h"
+#include "GpsOverlay.h"
 #include <pangolin/pangolin.h>
 #include <mutex>
 
@@ -393,6 +394,75 @@ void MapDrawer::DrawKeyFrames(const bool bDrawKF, const bool bDrawGraph, const b
                 glPopMatrix();
             }
         }
+    }
+}
+
+void MapDrawer::DrawGPS(const bool bDrawTraj, const bool bDrawLines)
+{
+    GpsOverlay& overlay = GpsOverlay::Instance();
+    if(!overlay.Enabled())
+        return;
+
+    Map* pActiveMap = mpAtlas->GetCurrentMap();
+    if(!pActiveMap)
+        return;
+
+    const vector<KeyFrame*> vpKFs = pActiveMap->GetAllKeyFrames();
+    if(vpKFs.empty())
+        return;
+
+    // Pull (timestamp, camera-centre) for each live keyframe and let GpsOverlay do the
+    // interpolation + umeyama + caching; everything below is already in the SLAM/GL frame.
+    std::vector<GpsOverlay::KeyFramePose> vKfPoses;
+    vKfPoses.reserve(vpKFs.size());
+    for(KeyFrame* pKF : vpKFs)
+    {
+        if(!pKF || pKF->isBad())
+            continue;
+        vKfPoses.push_back(std::make_pair(pKF->mTimeStamp, pKF->GetCameraCenter()));
+    }
+
+    const GpsOverlay::DrawData drawData = overlay.ComputeDrawData(vKfPoses);
+    if(!drawData.valid)
+        return;
+
+    if(bDrawTraj)
+    {
+        // Yellow GPS trajectory, broken across invalid gaps.
+        glLineWidth(2.0f);
+        glColor3f(1.0f,1.0f,0.0f);
+        for(const std::vector<Eigen::Vector3f>& segment : drawData.trajSegments)
+        {
+            glBegin(GL_LINE_STRIP);
+            for(const Eigen::Vector3f& point : segment)
+                glVertex3f(point(0),point(1),point(2));
+            glEnd();
+        }
+
+        // Dark-yellow points at each valid GPS-in-SLAM sample.
+        glPointSize(4.0f);
+        glColor3f(0.6f,0.6f,0.0f);
+        glBegin(GL_POINTS);
+        for(const std::vector<Eigen::Vector3f>& segment : drawData.trajSegments)
+        {
+            for(const Eigen::Vector3f& point : segment)
+                glVertex3f(point(0),point(1),point(2));
+        }
+        glEnd();
+    }
+
+    if(bDrawLines)
+    {
+        // Bright-orange correspondence lines: keyframe centre <-> its GPS-in-SLAM point.
+        glLineWidth(1.0f);
+        glColor3f(1.0f,0.6f,0.0f);
+        glBegin(GL_LINES);
+        for(const std::pair<Eigen::Vector3f,Eigen::Vector3f>& correspondence : drawData.correspondences)
+        {
+            glVertex3f(correspondence.first(0),correspondence.first(1),correspondence.first(2));
+            glVertex3f(correspondence.second(0),correspondence.second(1),correspondence.second(2));
+        }
+        glEnd();
     }
 }
 
