@@ -92,6 +92,12 @@ borrar/*
 
 */ExecMean.txt
 
+# Task W0 (mem-budget worktree): fast-gate times file is named times_*.txt, which the blanket
+# "time*" rule above would otherwise exclude - keep it tracked. Per-run outputs (trajectories,
+# logs, monitor CSVs, per-run config copies) are large/ephemeral and stay untracked.
+!eval_fast/times_*.txt
+eval_runs/
+
 # Stable-path git worktrees used for isolated multi-week development branches
 # (e.g. .worktrees/mem-budget) - never committed, built independently per worktree.
 .worktrees/
