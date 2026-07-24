@@ -19,6 +19,8 @@ namespace
 constexpr double kHomographyScaleEps = 1e-12;
 constexpr double kMinForwardNorm = 0.2;
 constexpr double kMinTranslationMm = 1e-6;
+constexpr double kMinPlaneNormalNorm = 0.2;   // plane-normal degeneracy floor (a unit normal is expected)
+constexpr double kMinRatioEps = 1e-6;         // epsilon on the unitless |t21|/d ratio magnitude
 
 /// Convert a 3x3 Eigen matrix to a fresh cv::Mat1d.
 cv::Mat1d to_cv(const Eigen::Matrix3d& matrix)
@@ -225,7 +227,7 @@ ICPoseDelta ICDecomposeHomographyToPose(const cv::Mat1d& homography_ref_to_cur, 
     ICPoseDelta delta;
 
     const double normal_norm = plane_normal_c1.norm();
-    if (normal_norm < kMinForwardNorm)
+    if (normal_norm < kMinPlaneNormalNorm)
     {
         return delta;  // no usable ground-plane normal (no gravity) -> caller keeps its own prior.
     }
@@ -262,7 +264,7 @@ ICPoseDelta ICDecomposeHomographyToPose(const cv::Mat1d& homography_ref_to_cur, 
     delta.ok = true;
     delta.rotation_c2_c1 = rotation_c2_c1;
     delta.translation_over_depth = translation_over_depth.norm();
-    if (delta.translation_over_depth > kMinTranslationMm)
+    if (delta.translation_over_depth > kMinRatioEps)
     {
         delta.unit_translation_c2 = translation_over_depth / delta.translation_over_depth;
     }
