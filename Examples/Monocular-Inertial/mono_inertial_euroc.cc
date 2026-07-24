@@ -168,7 +168,9 @@ int main(int argc, char *argv[])
         const double coverage_pct = tot_images > 0 ? 100.0 * static_cast<double>(saved_poses) / tot_images : 0.0;
         cout << "RUN SUMMARY: coverage " << saved_poses << "/" << tot_images << " poses ("
              << std::fixed << std::setprecision(2) << coverage_pct << "%) "
-             << (aborted ? "[DIVERGED-ABORT]" : "[COMPLETE]") << endl;
+             << (aborted ? "[DIVERGED-ABORT]" : "[COMPLETE]")
+             << " rescue_attempts=" << SLAM.GetICRescueAttempts()
+             << " rescue_successes=" << SLAM.GetICRescueSuccesses() << endl;
     };
 
     // Guard the whole processing run so an uncaught exception still reports coverage. The loop below is

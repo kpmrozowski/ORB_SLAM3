@@ -186,6 +186,11 @@ public:
 
     bool mbWriteStats;
 
+    // Cascade RESCUE telemetry (ORB_IC_CASCADE_RESCUE), surfaced for the run summary. Cumulative
+    // attempts and successful re-locks; both stay 0 when the rescue sub-flag is off.
+    long long GetICRescueAttempts() const { return mnICRescueAttempts; }
+    long long GetICRescueSuccesses() const { return mnICRescueSuccesses; }
+
 #ifdef REGISTER_TIMES
     void LocalMapStats2File();
     void TrackStats2File();

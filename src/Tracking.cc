@@ -1691,7 +1691,7 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 
     // Flush this frame's cascade telemetry (one CASC row) now that Track() has resolved the final state —
     // so a rescue attempt is logged as success ('R') / attempt ('r') correctly. Count rescue successes
-    // regardless of debug logging (the run summary reports them).
+    // regardless of debug logging (the example's RUN SUMMARY line reports them via System::GetICRescue*).
     if (mICCascade.computed)
     {
         if ((mICCascade.consumed & 4) && mState == OK)
