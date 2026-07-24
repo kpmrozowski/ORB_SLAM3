@@ -39,6 +39,11 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+
+#include <opencv2/calib3d.hpp>
+
+#include "BaroFusion.h"
 
 
 using namespace std;
@@ -1614,6 +1619,13 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
 }
 
 
+namespace
+{
+// Defined in the IC env-helper block just above Tracking::MonocularInitialization; GrabImageMonocular
+// (below) needs it earlier. Anonymous namespaces merge within a TU, so this forward declaration binds.
+bool ICTrackEnabled();
+}  // namespace
+
 Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
 {
     const std::chrono::steady_clock::time_point grab_start_time = std::chrono::steady_clock::now();
@@ -1671,6 +1683,14 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 
     lastID = mCurrentFrame.mnId;
     Track();
+
+    // Retain this frame's gray as the previous image for the next frame's IC TWMM gate (id-sentinel
+    // guards staleness; Track() has already set mLastFrame = Frame(mCurrentFrame)).
+    if (ICTrackEnabled() && (mSensor == System::MONOCULAR || mSensor == System::IMU_MONOCULAR))
+    {
+        mImICLastGray = mImGray.clone();
+        mnICLastFrameId = static_cast<long long>(mCurrentFrame.mnId);
+    }
 
     const double grab_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
                                std::chrono::steady_clock::now() - grab_start_time)
@@ -2530,6 +2550,541 @@ static int MInitWindowPx()
     return value;
 }
 
+// ===== IC (inverse-compositional) env-gated ORB false-positive match filter ======================
+// Env flags (all read once; unset => stock behavior). See docs/IC_INTEGRATION.md.
+namespace
+{
+bool ICEnvFlag(const char* name)
+{
+    const char* value = getenv(name);
+    return value != nullptr && atoi(value) != 0;
+}
+double ICEnvDouble(const char* name, const double fallback)
+{
+    const char* value = getenv(name);
+    return value != nullptr ? atof(value) : fallback;
+}
+int ICEnvInt(const char* name, const int fallback)
+{
+    const char* value = getenv(name);
+    return value != nullptr ? atoi(value) : fallback;
+}
+
+bool ICInitEnabled() { static const bool value = ICEnvFlag("ORB_IC_INIT"); return value; }
+bool ICTrackEnabled() { static const bool value = ICEnvFlag("ORB_IC_TRACK"); return value; }
+bool ICEnsembleEnabled() { static const bool value = ICEnvFlag("ORB_IC_ENSEMBLE"); return value; }
+double ICFilterPx() { static const double value = ICEnvDouble("ORB_IC_FILTER_PX", 3.0); return value; }
+double ICTrackPx() { static const double value = ICEnvDouble("ORB_IC_TRACK_PX", 6.0); return value; }
+double ICMinCorr() { static const double value = ICEnvDouble("ORB_IC_MIN_CORR", 0.8); return value; }
+double ICTrackMinCorr() { static const double value = ICEnvDouble("ORB_IC_TRACK_MIN_CORR", 0.75); return value; }
+int ICTrackMin() { static const int value = ICEnvInt("ORB_IC_TRACK_MIN", 20); return value; }
+int ICInitGaussIters() { static const int value = ICEnvInt("ORB_IC_GAUSS_ITERS", 30); return value; }
+int ICInitGnIters() { static const int value = ICEnvInt("ORB_IC_GN_ITERS", 60); return value; }
+int ICTrackGaussIters() { static const int value = ICEnvInt("ORB_IC_TRACK_GAUSS_ITERS", 8); return value; }
+int ICTrackGnIters() { static const int value = ICEnvInt("ORB_IC_TRACK_GN_ITERS", 12); return value; }
+double ICGateFloor() { static const double value = ICEnvDouble("ORB_IC_GATE_FLOOR", 0.5); return value; }
+double ICGateMargin() { static const double value = ICEnvDouble("ORB_IC_GATE_MARGIN", 0.05); return value; }
+double ICMaxDt() { static const double value = ICEnvDouble("ORB_IC_MAX_DT", 1.0); return value; }
+bool ICGateRelative()
+{
+    static const bool value = []() -> bool
+    {
+        const char* mode = getenv("ORB_IC_GATE_MODE");
+        return mode != nullptr && std::string(mode) == "rel";
+    }();
+    return value;
+}
+
+// Acceptance gate: absolute min-corr (default) or the lab-final relative tolerance below the used seed.
+bool ICGatePass(const double refined, const double used_seed_zncc, const double absolute_min)
+{
+    if (ICGateRelative())
+    {
+        return refined >= ICGateFloor() && refined >= used_seed_zncc - ICGateMargin();
+    }
+    return refined >= absolute_min;
+}
+
+// Optional rangefinder AGL source (ORB_IC_RFND_CSV = "t_ns,dist_m"); empty when unset/missing.
+struct RangefinderSeries
+{
+    std::vector<double> time_sec;
+    std::vector<double> distance_m;
+};
+const RangefinderSeries& ICRangefinder()
+{
+    static const RangefinderSeries series = []() -> RangefinderSeries
+    {
+        RangefinderSeries out;
+        const char* path = getenv("ORB_IC_RFND_CSV");
+        if (path == nullptr)
+        {
+            return out;
+        }
+        std::ifstream file(path);
+        std::string line;
+        while (std::getline(file, line))
+        {
+            if (line.empty() || line[0] == '#')
+            {
+                continue;
+            }
+            const size_t comma = line.find(',');
+            if (comma == std::string::npos)
+            {
+                continue;
+            }
+            try
+            {
+                out.time_sec.push_back(std::stod(line.substr(0, comma)) * 1e-9);
+                out.distance_m.push_back(std::stod(line.substr(comma + 1)));
+            }
+            catch (...)
+            {
+                continue;
+            }
+        }
+        return out;
+    }();
+    return series;
+}
+bool ICRangefinderAglMm(const double time_sec, const double cos_tilt, double& agl_mm)
+{
+    const RangefinderSeries& series = ICRangefinder();
+    if (series.time_sec.empty() || time_sec < series.time_sec.front() || time_sec > series.time_sec.back())
+    {
+        return false;
+    }
+    const std::vector<double>::const_iterator upper =
+        std::lower_bound(series.time_sec.begin(), series.time_sec.end(), time_sec);
+    double distance = series.distance_m.back();
+    if (upper == series.time_sec.begin())
+    {
+        distance = series.distance_m.front();
+    }
+    else if (upper != series.time_sec.end())
+    {
+        const size_t hi = upper - series.time_sec.begin();
+        const size_t lo = hi - 1;
+        const double span = series.time_sec[hi] - series.time_sec[lo];
+        const double weight = span > 0.0 ? (time_sec - series.time_sec[lo]) / span : 0.0;
+        distance = (1.0 - weight) * series.distance_m[lo] + weight * series.distance_m[hi];
+    }
+    agl_mm = distance * cos_tilt * 1000.0;
+    return agl_mm > 500.0;
+}
+
+Eigen::Matrix3d ICMatToEigen3d(const cv::Mat1d& matrix)
+{
+    Eigen::Matrix3d result;
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int col = 0; col < 3; ++col)
+        {
+            result(row, col) = matrix(row, col);
+        }
+    }
+    return result;
+}
+
+void ICOpenStatsIfNeeded(std::ofstream& file, bool& header_written)
+{
+    if (file.is_open())
+    {
+        return;
+    }
+    const char* dir = getenv("ORB_IC_DEBUG_DIR");
+    if (dir == nullptr)
+    {
+        return;
+    }
+    file.open(std::string(dir) + "/ic_stats.csv", std::ios::out | std::ios::trunc);
+    if (file.is_open() && !header_written)
+    {
+        file << "kind,frame_ref,frame_cur,t_ref,t_cur,n_matches,seed_src,used_seed_zncc,ecc_seed_rot,"
+                "ecc_seed_full,ecc_ic,ecc_orb,ensemble_winner,gate,invalidated,survivors,ms\n";
+        header_written = true;
+    }
+}
+}  // namespace
+
+bool Tracking::EnsureICUndistorter(const cv::Size& imageSize)
+{
+    if (mpICUndistorter)
+    {
+        return true;
+    }
+    if (mbICUndistorterTried)
+    {
+        return false;
+    }
+    mbICUndistorterTried = true;
+    mpICUndistorter = ICUndistorter::Create(mpCamera, imageSize);
+    if (mpICUndistorter && !mpICEngine)
+    {
+        mpICEngine.reset(new ICEngine());
+    }
+    return static_cast<bool>(mpICUndistorter);
+}
+
+bool Tracking::BuildICSeedInput(const bool isInit, ICSeedInput& seedInput, double& dtSec) const
+{
+    seedInput.intrinsic = mpICUndistorter->IntrinsicEigen();
+
+    const IMU::Calib& calib = mCurrentFrame.mImuCalib;
+    seedInput.rotation_cam_body = calib.mTcb.rotationMatrix().cast<double>();
+    seedInput.rotation_body_cam = calib.mTbc.rotationMatrix().cast<double>();
+    seedInput.translation_body_cam_mm = calib.mTbc.translation().cast<double>() * 1000.0;
+
+    // Rotation: init uses the from-last-KF preintegration (zero bias); track uses the per-frame one.
+    IMU::Preintegrated* preintegrated = isInit ? mpImuPreintegratedFromLastKF : mCurrentFrame.mpImuPreintegratedFrame;
+    if (preintegrated == nullptr || preintegrated->dT <= 0.0f)
+    {
+        return false;  // no gyro rotation (e.g. pure MONOCULAR) -> caller skips IC, never ORB-seeded
+    }
+    const IMU::Bias bias = isInit ? IMU::Bias() : mLastFrame.mImuBias;
+    seedInput.delta_rotation_ref_from_cur = preintegrated->GetDeltaRotation(bias).cast<double>();
+    seedInput.has_rotation = true;
+
+    // Gravity direction from the mean specific force over the preintegration window.
+    const Eigen::Vector3d mean_specific_force = preintegrated->avgA.cast<double>();
+    const double specific_force_norm = mean_specific_force.norm();
+    if (specific_force_norm > 0.5 * 9.81 && specific_force_norm < 1.5 * 9.81)
+    {
+        seedInput.up_body = mean_specific_force.normalized();
+        seedInput.has_gravity = true;
+    }
+
+    const double reference_time = isInit ? mInitialFrame.mTimeStamp : mLastFrame.mTimeStamp;
+    dtSec = mCurrentFrame.mTimeStamp - reference_time;
+    seedInput.dt_sec = dtSec;
+
+    // Metric translation ingredients: baro climb + forward-speed prior; AGL from rfnd then baro.
+    seedInput.horizontal_speed_mm_s = ICSpeedPriorMps() * 1000.0;
+    const BaroFusion& baro = BaroFusion::Instance();
+    if (baro.Enabled())
+    {
+        seedInput.climb_rate_mm_s = baro.ClimbRateAt(reference_time, 1.0) * 1000.0;
+    }
+    const double cos_tilt = seedInput.has_gravity ? std::max(std::abs(seedInput.up_body.z()), 0.2) : 1.0;
+    double agl_mm = 0.0;
+    if (ICRangefinderAglMm(reference_time, cos_tilt, agl_mm))
+    {
+        seedInput.agl_mm = agl_mm;
+        seedInput.has_agl = true;
+    }
+    else if (baro.Enabled())
+    {
+        double agl_m = 0.0;
+        if (baro.AglAt(reference_time, agl_m) && agl_m * 1000.0 > 2000.0)
+        {
+            seedInput.agl_mm = agl_m * 1000.0;
+            seedInput.has_agl = true;
+        }
+    }
+
+    seedInput.allow_prev = ICSeedPrevEnabled() && !isInit;
+    seedInput.prev_valid = mbICPrevValid;
+    seedInput.prev_homography_gyro = mICPrevHomographyGyro;
+    seedInput.prev_homography_ic = mICPrevHomographyIc;
+    seedInput.image_width = mImGray.cols;
+    seedInput.image_height = mImGray.rows;
+    return true;
+}
+
+void Tracking::ICFilterInitMatches(int& nmatches)
+{
+    if (!ICInitEnabled() || (mSensor != System::MONOCULAR && mSensor != System::IMU_MONOCULAR))
+    {
+        return;
+    }
+    if (mImICInitGray.empty() || mnICInitFrameId != static_cast<long long>(mInitialFrame.mnId))
+    {
+        return;
+    }
+    if (mImGray.empty() || mImGray.size() != mImICInitGray.size() || !EnsureICUndistorter(mImGray.size()))
+    {
+        return;
+    }
+
+    ICSeedInput seedInput;
+    double dtSec = 0.0;
+    if (!BuildICSeedInput(true, seedInput, dtSec) || dtSec <= 0.0 || dtSec > ICMaxDt())
+    {
+        return;  // F3 dt-gap guard / no seed -> matches untouched (fail open)
+    }
+
+    const cv::Mat1b undistortedRef = mpICUndistorter->UndistortImage(mImICInitGray);
+    const cv::Mat1b undistortedCur = mpICUndistorter->UndistortImage(mImGray);
+    const ICSeedResult seed = ICBuildSeed(seedInput, undistortedRef, undistortedCur);
+    if (seed.source == ICSeedSource::Failed)
+    {
+        return;
+    }
+
+    ICStopCriteria criteria;
+    criteria.gauss_iterations = ICInitGaussIters();
+    criteria.gauss_newton_iterations = ICInitGnIters();
+    const std::chrono::steady_clock::time_point icStart = std::chrono::steady_clock::now();
+    cv::Mat1d refinedHomography;
+    double correlationIc = -1.0;
+    std::tie(correlationIc, refinedHomography) = mpICEngine->Refine(undistortedRef, undistortedCur, seed.homography, criteria);
+    const double icMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - icStart).count();
+
+    // Surviving-match undistorted point pairs (parallel to matchIndex).
+    std::vector<int> matchIndex;
+    std::vector<cv::Point2f> refRaw, curRaw;
+    for (size_t i = 0; i < mvIniMatches.size(); ++i)
+    {
+        if (mvIniMatches[i] < 0)
+        {
+            continue;
+        }
+        matchIndex.push_back(static_cast<int>(i));
+        refRaw.push_back(mInitialFrame.mvKeys[i].pt);
+        curRaw.push_back(mCurrentFrame.mvKeys[mvIniMatches[i]].pt);
+    }
+    if (matchIndex.empty())
+    {
+        return;
+    }
+    const std::vector<cv::Point2f> refUn = mpICUndistorter->UndistortPoints(refRaw);
+    const std::vector<cv::Point2f> curUn = mpICUndistorter->UndistortPoints(curRaw);
+
+    // Ensemble ECC voting: fit H_orb and pick the FILTER reference by argmax consistent ZNCC. ORB never
+    // seeds IC and TVR is untouched; voting only chooses which homography the transfer gate uses.
+    cv::Mat1d referenceHomography = refinedHomography;
+    double correlationOrb = -1.0;
+    const char* ensembleWinner = "ic";
+    if (ICEnsembleEnabled() && static_cast<int>(matchIndex.size()) >= 8)
+    {
+        cv::Mat inlierMask;
+        const cv::Mat homographyOrb = cv::findHomography(refUn, curUn, cv::RANSAC, 3.0, inlierMask, 2000, 0.995);
+        if (!homographyOrb.empty() && cv::checkRange(homographyOrb))
+        {
+            const cv::Mat1d homographyOrb1d(homographyOrb);
+            correlationOrb = ICCorrelationCoefficient(undistortedRef, undistortedCur, homographyOrb1d, true);
+            if (correlationOrb > correlationIc)
+            {
+                referenceHomography = homographyOrb1d;
+                ensembleWinner = "orb";
+            }
+        }
+    }
+
+    const double referenceCorrelation = (std::string(ensembleWinner) == "orb") ? correlationOrb : correlationIc;
+    const bool gatePass = ICGatePass(referenceCorrelation, seed.used_seed_zncc, ICMinCorr());
+
+    const cv::Matx33d homographyRef = ICToMatx33(referenceHomography);
+    const cv::Matx33d homographyRefInverse = homographyRef.inv();
+    int wouldRemove = 0;
+    std::vector<bool> remove(matchIndex.size(), false);
+    for (size_t k = 0; k < matchIndex.size(); ++k)
+    {
+        const double error = ICSymmetricTransferError(homographyRef, homographyRefInverse, refUn[k], curUn[k]);
+        if (error > ICFilterPx())
+        {
+            remove[k] = true;
+            ++wouldRemove;
+        }
+    }
+    const int survivors = static_cast<int>(matchIndex.size()) - wouldRemove;
+    const bool guardBlocks = survivors < MInitMinMatches();
+    const bool applied = gatePass && !guardBlocks;
+
+    int invalidated = 0;
+    if (applied)
+    {
+        for (size_t k = 0; k < matchIndex.size(); ++k)
+        {
+            if (remove[k])
+            {
+                mvIniMatches[matchIndex[k]] = -1;
+                --nmatches;
+                ++invalidated;
+            }
+        }
+    }
+
+    if (ICDebugEnabled())
+    {
+        const char* gateLabel = !gatePass ? "lowcorr" : (guardBlocks ? "guard" : "pass");
+        ICOpenStatsIfNeeded(mICStatsFile, mbICStatsHeaderWritten);
+        if (mICStatsFile.is_open())
+        {
+            mICStatsFile << "INIT," << mInitialFrame.mnId << "," << mCurrentFrame.mnId << "," << std::fixed
+                         << std::setprecision(6) << mInitialFrame.mTimeStamp << "," << mCurrentFrame.mTimeStamp << ","
+                         << matchIndex.size() << "," << ICSeedSourceLabel(seed.source) << "," << seed.used_seed_zncc
+                         << "," << seed.zncc_rotation_only << "," << seed.zncc_full << "," << correlationIc << ","
+                         << correlationOrb << "," << ensembleWinner << "," << gateLabel << "," << invalidated << ","
+                         << survivors << "," << icMs << "\n";
+            mICStatsFile.flush();
+        }
+        fprintf(stderr,
+                "IC_INIT t=%.3f dt=%.3f n=%d seed=%s ecc_seed=%.3f ecc_ic=%.3f ecc_orb=%.3f winner=%s gate=%s "
+                "inval=%d/%d ms=%.1f\n",
+                mCurrentFrame.mTimeStamp, dtSec, static_cast<int>(matchIndex.size()), ICSeedSourceLabel(seed.source),
+                seed.used_seed_zncc, correlationIc, correlationOrb, ensembleWinner, gateLabel, invalidated,
+                static_cast<int>(matchIndex.size()), icMs);
+    }
+}
+
+void Tracking::ICFilterTrackMatches(int& nmatches)
+{
+    if (!ICTrackEnabled() || (mSensor != System::MONOCULAR && mSensor != System::IMU_MONOCULAR))
+    {
+        return;
+    }
+    if (mImICLastGray.empty() || mnICLastFrameId != static_cast<long long>(mLastFrame.mnId))
+    {
+        return;
+    }
+    if (mImGray.empty() || mImGray.size() != mImICLastGray.size() || !EnsureICUndistorter(mImGray.size()))
+    {
+        mbICPrevValid = false;
+        return;
+    }
+
+    ICSeedInput seedInput;
+    double dtSec = 0.0;
+    if (!BuildICSeedInput(false, seedInput, dtSec) || dtSec <= 0.0 || dtSec > ICMaxDt())
+    {
+        mbICPrevValid = false;
+        return;
+    }
+
+    const cv::Mat1b undistortedRef = mpICUndistorter->UndistortImage(mImICLastGray);
+    const cv::Mat1b undistortedCur = mpICUndistorter->UndistortImage(mImGray);
+    const ICSeedResult seed = ICBuildSeed(seedInput, undistortedRef, undistortedCur);
+    if (seed.source == ICSeedSource::Failed)
+    {
+        mbICPrevValid = false;
+        return;
+    }
+
+    ICStopCriteria criteria;
+    criteria.gauss_iterations = ICTrackGaussIters();
+    criteria.gauss_newton_iterations = ICTrackGnIters();
+    const std::chrono::steady_clock::time_point icStart = std::chrono::steady_clock::now();
+    cv::Mat1d refinedHomography;
+    double correlationIc = -1.0;
+    std::tie(correlationIc, refinedHomography) = mpICEngine->Refine(undistortedRef, undistortedCur, seed.homography, criteria);
+    const double icMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - icStart).count();
+
+    const bool gatePass = ICGatePass(correlationIc, seed.used_seed_zncc, ICTrackMinCorr());
+    // Update previous-pair propagation state on any accepted pair (used by the next pair's seed family).
+    if (gatePass)
+    {
+        mbICPrevValid = true;
+        mICPrevHomographyGyro = seed.homography_gyro;
+        mICPrevHomographyIc = ICMatToEigen3d(refinedHomography);
+    }
+    else
+    {
+        mbICPrevValid = false;
+    }
+
+    // Recover each current map point's last-frame pixel via a lookup table.
+    std::unordered_map<MapPoint*, int> lastIndexByMapPoint;
+    for (int i = 0; i < mLastFrame.N; ++i)
+    {
+        MapPoint* mapPoint = mLastFrame.mvpMapPoints[i];
+        if (mapPoint)
+        {
+            lastIndexByMapPoint[mapPoint] = i;
+        }
+    }
+    std::vector<int> curIdx;
+    std::vector<cv::Point2f> lastRaw, curRaw;
+    std::vector<bool> mapObserved;
+    for (int j = 0; j < mCurrentFrame.N; ++j)
+    {
+        MapPoint* mapPoint = mCurrentFrame.mvpMapPoints[j];
+        if (!mapPoint || mCurrentFrame.mvbOutlier[j])
+        {
+            continue;
+        }
+        const std::unordered_map<MapPoint*, int>::const_iterator found = lastIndexByMapPoint.find(mapPoint);
+        if (found == lastIndexByMapPoint.end())
+        {
+            continue;
+        }
+        curIdx.push_back(j);
+        lastRaw.push_back(mLastFrame.mvKeys[found->second].pt);
+        curRaw.push_back(mCurrentFrame.mvKeys[j].pt);
+        mapObserved.push_back(mapPoint->Observations() > 0);
+    }
+    const int matched = static_cast<int>(curIdx.size());
+    const int mapObservedCount = static_cast<int>(std::count(mapObserved.begin(), mapObserved.end(), true));
+
+    int invalidated = 0;
+    int survivors = matched;
+    const char* gateLabel = gatePass ? "pass" : "lowcorr";
+    // Survivor floors so the filter can never fail TWMM on its own.
+    if (gatePass && matched >= ICTrackMin() && mapObservedCount >= 10)
+    {
+        const std::vector<cv::Point2f> lastUn = mpICUndistorter->UndistortPoints(lastRaw);
+        const std::vector<cv::Point2f> curUn = mpICUndistorter->UndistortPoints(curRaw);
+        const cv::Matx33d homographyIc = ICToMatx33(refinedHomography);
+        std::vector<bool> remove(matched, false);
+        int wouldRemove = 0;
+        int wouldRemoveObserved = 0;
+        for (int k = 0; k < matched; ++k)
+        {
+            const double error = ICTransferError(homographyIc, lastUn[k], curUn[k]);
+            if (error > ICTrackPx())
+            {
+                remove[k] = true;
+                ++wouldRemove;
+                if (mapObserved[k])
+                {
+                    ++wouldRemoveObserved;
+                }
+            }
+        }
+        survivors = matched - wouldRemove;
+        if (survivors >= ICTrackMin() && (mapObservedCount - wouldRemoveObserved) >= 10)
+        {
+            for (int k = 0; k < matched; ++k)
+            {
+                if (remove[k])
+                {
+                    mCurrentFrame.mvpMapPoints[curIdx[k]] = static_cast<MapPoint*>(NULL);
+                    --nmatches;
+                    ++invalidated;
+                }
+            }
+        }
+        else
+        {
+            survivors = matched;
+            gateLabel = "guard";
+        }
+    }
+    else if (gatePass)
+    {
+        gateLabel = "guard";
+    }
+
+    if (ICDebugEnabled())
+    {
+        ICOpenStatsIfNeeded(mICStatsFile, mbICStatsHeaderWritten);
+        if (mICStatsFile.is_open())
+        {
+            mICStatsFile << "TRACK," << mLastFrame.mnId << "," << mCurrentFrame.mnId << "," << std::fixed
+                         << std::setprecision(6) << mLastFrame.mTimeStamp << "," << mCurrentFrame.mTimeStamp << ","
+                         << matched << "," << ICSeedSourceLabel(seed.source) << "," << seed.used_seed_zncc << ","
+                         << seed.zncc_rotation_only << "," << seed.zncc_full << "," << correlationIc << ",-1,none,"
+                         << gateLabel << "," << invalidated << "," << survivors << "," << icMs << "\n";
+            mICStatsFile.flush();
+        }
+        fprintf(stderr,
+                "IC_TRACK t=%.3f dt=%.3f n=%d seed=%s ecc_seed=%.3f ecc_ic=%.3f gate=%s inval=%d/%d ms=%.1f\n",
+                mCurrentFrame.mTimeStamp, dtSec, matched, ICSeedSourceLabel(seed.source), seed.used_seed_zncc,
+                correlationIc, gateLabel, invalidated, matched, icMs);
+    }
+}
+
 void Tracking::MonocularInitialization()
 {
 
@@ -2546,6 +3101,13 @@ void Tracking::MonocularInitialization()
                 mvbPrevMatched[i]=mCurrentFrame.mvKeysUn[i].pt;
 
             fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
+
+            // Retain the init reference gray for the IC match filter (id-sentinel guards staleness).
+            if (ICInitEnabled())
+            {
+                mImICInitGray = mImGray.clone();
+                mnICInitFrameId = static_cast<long long>(mInitialFrame.mnId);
+            }
 
             if (mSensor == System::IMU_MONOCULAR)
             {
@@ -2568,6 +3130,8 @@ void Tracking::MonocularInitialization()
         if (((int)mCurrentFrame.mvKeys.size()<=100)||((mSensor == System::IMU_MONOCULAR)&&(mLastFrame.mTimeStamp-mInitialFrame.mTimeStamp>1.0)))
         {
             mbReadyToInitializate = false;
+            mnICInitFrameId = -1;
+            mImICInitGray.release();
 
             return;
         }
@@ -2585,8 +3149,14 @@ void Tracking::MonocularInitialization()
         if(nmatches<MInitMinMatches())
         {
             mbReadyToInitializate = false;
+            mnICInitFrameId = -1;
+            mImICInitGray.release();
             return;
         }
+
+        // IC init-pair filter: prune ORB false-positive matches via the dense IMU-seeded refinement,
+        // before ReconstructWithTwoViews consumes mvIniMatches. Fail-open; no-op unless ORB_IC_INIT=1.
+        ICFilterInitMatches(nmatches);
 
         Sophus::SE3f Tcw;
         vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
@@ -2751,6 +3321,10 @@ void Tracking::CreateInitialMapMonocular()
     mState=OK;
 
     initID = pKFcur->mnId;
+
+    // Init pair consumed: drop the retained reference so a re-init cannot reuse a stale image.
+    mnICInitFrameId = -1;
+    mImICInitGray.release();
 }
 
 
@@ -2790,6 +3364,13 @@ void Tracking::CreateMapInAtlas()
     mLastFrame = Frame();
     mCurrentFrame = Frame();
     mvIniMatches.clear();
+
+    // Invalidate IC retained images / previous-pair state across the map switch.
+    mnICInitFrameId = -1;
+    mImICInitGray.release();
+    mnICLastFrameId = -1;
+    mImICLastGray.release();
+    mbICPrevValid = false;
 
     mbCreatedMap = true;
 }
@@ -2990,6 +3571,11 @@ bool Tracking::TrackWithMotionModel()
         Verbose::PrintMess("Matches with wider search: " + to_string(nmatches), Verbose::VERBOSITY_NORMAL);
 
     }
+
+    // IC frame-rate gate: prune false-positive last-frame map-point matches via the dense IMU-seeded
+    // refinement. Active pre-IMU-init / post-reloc (TWMM early-returns once IMU is initialized). Survivor
+    // floors keep it from ever failing TWMM on its own. Fail-open; no-op unless ORB_IC_TRACK=1.
+    ICFilterTrackMatches(nmatches);
 
     if(nmatches<20)
     {
@@ -3938,6 +4524,13 @@ void Tracking::Reset(bool bLocMap)
     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
     mvIniMatches.clear();
 
+    // Frame::nNextId is reset above, so IC id-sentinels must be invalidated to avoid a stale match.
+    mnICInitFrameId = -1;
+    mImICInitGray.release();
+    mnICLastFrameId = -1;
+    mImICLastGray.release();
+    mbICPrevValid = false;
+
     if(mpViewer)
         mpViewer->Release();
 
@@ -4026,6 +4619,13 @@ void Tracking::ResetActiveMap(bool bLocMap)
     mpReferenceKF = static_cast<KeyFrame*>(NULL);
     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
     mvIniMatches.clear();
+
+    // Invalidate IC retained images / previous-pair state across the active-map reset.
+    mnICInitFrameId = -1;
+    mImICInitGray.release();
+    mnICLastFrameId = -1;
+    mImICLastGray.release();
+    mbICPrevValid = false;
 
     mbVelocity = false;
 

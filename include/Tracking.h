@@ -40,6 +40,10 @@
 
 #include "GeometricCamera.h"
 
+#include "ICAlign.h"
+#include "ICSeed.h"
+
+#include <memory>
 #include <mutex>
 #include <unordered_set>
 
@@ -217,6 +221,14 @@ protected:
     bool TrackWithMotionModel();
     bool PredictStateIMU();
 
+    // --- IC (inverse-compositional) env-gated ORB false-positive match filter (ICAlign / ICSeed) ---
+    // All fail-open: any missing ingredient leaves the matches untouched (stock behavior). Active only
+    // for the monocular sensors and only when the corresponding env flag is set.
+    void ICFilterInitMatches(int &nmatches);   // ORB_IC_INIT: prune mvIniMatches vs the refined seed H
+    void ICFilterTrackMatches(int &nmatches);  // ORB_IC_TRACK: prune mCurrentFrame map points (TWMM)
+    bool EnsureICUndistorter(const cv::Size &imageSize);  // lazy build; false + no-retry on unknown cam
+    bool BuildICSeedInput(const bool isInit, ICSeedInput &seedInput, double &dtSec) const;
+
     bool Relocalization();
 
     void UpdateLocalMap();
@@ -340,6 +352,20 @@ protected:
     //Motion Model
     bool mbVelocity{false};
     Sophus::SE3f mVelocity;
+
+    // --- IC match-filter state (see ICFilterInitMatches / ICFilterTrackMatches) ---
+    std::unique_ptr<ICEngine> mpICEngine;              // dense refinement engine (~16 MB), lazily built
+    std::unique_ptr<ICUndistorter> mpICUndistorter;    // P==K rectifier from mpCamera, lazily built
+    bool mbICUndistorterTried = false;                 // unknown-camera-type build failed -> never retry
+    cv::Mat mImICInitGray;                             // retained init reference gray (post-CLAHE, distorted)
+    long long mnICInitFrameId = -1;                    // id-sentinel: valid only when == mInitialFrame.mnId
+    cv::Mat mImICLastGray;                             // retained previous-frame gray for the TWMM gate
+    long long mnICLastFrameId = -1;                    // id-sentinel: valid only when == mLastFrame.mnId
+    bool mbICPrevValid = false;                        // previous-pair propagation state (TWMM)
+    Eigen::Matrix3d mICPrevHomographyGyro = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d mICPrevHomographyIc = Eigen::Matrix3d::Identity();
+    std::ofstream mICStatsFile;                        // ic_stats.csv under ORB_IC_DEBUG_DIR, opened lazily
+    bool mbICStatsHeaderWritten = false;
 
     //Color order (true RGB, false BGR, ignored if grayscale)
     bool mbRGB;
