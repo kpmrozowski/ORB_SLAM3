@@ -23,6 +23,7 @@
 #include<chrono>
 #include <cstdlib>
 #include <ctime>
+#include <iomanip>
 #include <sstream>
 
 #include<opencv2/core/core.hpp>
@@ -136,6 +137,9 @@ int main(int argc, char *argv[])
     double t_resize = 0.f;
     double t_track = 0.f;
 
+    // The early-divergence guard (ORB_DIVERGE_*) aborts by default; record it so the run summary always
+    // reports final coverage instead of silently forfeiting the flight.
+    bool bDiverged = false;
     int proccIm=0;
     for (seq = 0; seq<num_seq; seq++)
     {
@@ -210,6 +214,7 @@ int main(int argc, char *argv[])
             if(SLAM.isDiverged())
             {
                 cout << "[DIVERGE] stopping sequence early at frame " << ni << endl;
+                bDiverged = true;
                 break;
             }
 
@@ -253,18 +258,27 @@ int main(int argc, char *argv[])
     SLAM.Shutdown();
 
     // Save camera trajectory
-    if (bFileName)
+    const string f_file = bFileName ? ("f_" + string(argv[argc-1]) + ".txt") : string("CameraTrajectory.txt");
+    const string kf_file = bFileName ? ("kf_" + string(argv[argc-1]) + ".txt") : string("KeyFrameTrajectory.txt");
+    SLAM.SaveTrajectoryEuRoC(f_file);
+    SLAM.SaveKeyFrameTrajectoryEuRoC(kf_file);
+
+    // Run summary: ALWAYS report final coverage (saved poses / total frames), whether the run completed
+    // or the divergence guard aborted it — so an abort never silently forfeits a flight without a number.
+    long saved_poses = 0;
     {
-        const string kf_file =  "kf_" + string(argv[argc-1]) + ".txt";
-        const string f_file =  "f_" + string(argv[argc-1]) + ".txt";
-        SLAM.SaveTrajectoryEuRoC(f_file);
-        SLAM.SaveKeyFrameTrajectoryEuRoC(kf_file);
+        ifstream f_traj(f_file);
+        string traj_line;
+        while (getline(f_traj, traj_line))
+        {
+            if (!traj_line.empty())
+                ++saved_poses;
+        }
     }
-    else
-    {
-        SLAM.SaveTrajectoryEuRoC("CameraTrajectory.txt");
-        SLAM.SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
-    }
+    const double coverage_pct = tot_images > 0 ? 100.0 * static_cast<double>(saved_poses) / tot_images : 0.0;
+    cout << "RUN SUMMARY: coverage " << saved_poses << "/" << tot_images << " poses ("
+         << std::fixed << std::setprecision(2) << coverage_pct << "%) "
+         << (bDiverged ? "[DIVERGED-ABORT]" : "[COMPLETE]") << endl;
 
     return 0;
 }
