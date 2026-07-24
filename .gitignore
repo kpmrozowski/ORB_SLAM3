@@ -91,3 +91,7 @@ my_settings.txt
 borrar/*
 
 */ExecMean.txt
+
+# Stable-path git worktrees used for isolated multi-week development branches
+# (e.g. .worktrees/mem-budget) - never committed, built independently per worktree.
+.worktrees/
