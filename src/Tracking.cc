@@ -658,6 +658,20 @@ void Tracking::newParameterLoader(Settings *settings) {
     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
         mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
+    // ORB_NF_TRACK: split feature budget -- reduced ORB extraction for TRACKING frames only, while
+    // initialization frames (incl. re-inits after map resets) keep the stock 5x-nFeatures budget
+    // above. Fail-open: unset/<=0 leaves mpORBextractorTrack null -> stock path byte-identical.
+    {
+        const char* const nfTrackEnv = std::getenv("ORB_NF_TRACK");
+        const int nfTrack = (nfTrackEnv != nullptr) ? std::atoi(nfTrackEnv) : 0;
+        if (nfTrack > 0 && (mSensor == System::MONOCULAR || mSensor == System::IMU_MONOCULAR))
+        {
+            mpORBextractorTrack = new ORBextractor(nfTrack, fScaleFactor, nLevels, fIniThFAST, fMinThFAST);
+            std::cout << "NF_TRACK: tracking-frame ORB budget override = " << nfTrack
+                      << " (init keeps 5x " << nFeatures << ")" << std::endl;
+        }
+    }
+
     //IMU parameters
     Sophus::SE3f Tbc = settings->Tbc();
     mInsertKFsLost = settings->insertKFsWhenLost();
@@ -1346,6 +1360,20 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
         mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
+    // ORB_NF_TRACK: split feature budget -- reduced ORB extraction for TRACKING frames only, while
+    // initialization frames (incl. re-inits after map resets) keep the stock 5x-nFeatures budget
+    // above. Fail-open: unset/<=0 leaves mpORBextractorTrack null -> stock path byte-identical.
+    {
+        const char* const nfTrackEnv = std::getenv("ORB_NF_TRACK");
+        const int nfTrack = (nfTrackEnv != nullptr) ? std::atoi(nfTrackEnv) : 0;
+        if (nfTrack > 0 && (mSensor == System::MONOCULAR || mSensor == System::IMU_MONOCULAR))
+        {
+            mpORBextractorTrack = new ORBextractor(nfTrack, fScaleFactor, nLevels, fIniThFAST, fMinThFAST);
+            std::cout << "NF_TRACK: tracking-frame ORB budget override = " << nfTrack
+                      << " (init keeps 5x " << nFeatures << ")" << std::endl;
+        }
+    }
+
     cout << endl << "ORB Extractor Parameters: " << endl;
     cout << "- Number of Features: " << nFeatures << endl;
     cout << "- Scale Levels: " << nLevels << endl;
@@ -1664,7 +1692,8 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
             mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
         else
-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+            // ORB_NF_TRACK: tracking frames may use the reduced-budget extractor (null -> stock).
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorTrack != nullptr ? mpORBextractorTrack : mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
     }
     else if(mSensor == System::IMU_MONOCULAR)
     {
@@ -1673,7 +1702,8 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
             mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
         }
         else
-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+            // ORB_NF_TRACK: tracking frames may use the reduced-budget extractor (null -> stock).
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorTrack != nullptr ? mpORBextractorTrack : mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
     }
 
     if (mState==NO_IMAGES_YET)

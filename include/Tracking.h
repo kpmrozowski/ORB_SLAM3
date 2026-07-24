@@ -293,6 +293,12 @@ protected:
     //ORB
     ORBextractor* mpORBextractorLeft, *mpORBextractorRight;
     ORBextractor* mpIniORBextractor;
+    // ORB_NF_TRACK (env, int > 0): reduced ORB budget used for TRACKING frames only (monocular
+    // paths). Initialization frames keep the stock 5x-nFeatures mpIniORBextractor budget, including
+    // after mid-run map resets. Unset/<=0 -> nullptr -> stock mpORBextractorLeft path (fail-open).
+    // Note: with ORB_PREFETCH the cache serves only mpORBextractorLeft (pointer-identity guard in
+    // Frame::ExtractORB), so an active override silently bypasses the cache -- correct, just unused.
+    ORBextractor* mpORBextractorTrack = nullptr;
 
     // Owns the feature prefetcher when ORB_PREFETCH is enabled (nullptr otherwise).
     std::unique_ptr<FeaturePrefetcher> mpFeaturePrefetcher;
