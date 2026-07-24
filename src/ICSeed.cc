@@ -219,4 +219,52 @@ ICSeedResult ICBuildSeed(const ICSeedInput& input, const cv::Mat1b& undistorted_
     return result;
 }
 
+ICPoseDelta ICDecomposeHomographyToPose(const cv::Mat1d& homography_ref_to_cur, const Eigen::Matrix3d& intrinsic,
+                                        const Eigen::Matrix3d& rotation_c2_c1, const Eigen::Vector3d& plane_normal_c1)
+{
+    ICPoseDelta delta;
+
+    const double normal_norm = plane_normal_c1.norm();
+    if (normal_norm < kMinForwardNorm)
+    {
+        return delta;  // no usable ground-plane normal (no gravity) -> caller keeps its own prior.
+    }
+    const Eigen::Vector3d normal_unit = plane_normal_c1 / normal_norm;
+
+    Eigen::Matrix3d homography;
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int col = 0; col < 3; ++col)
+        {
+            homography(row, col) = homography_ref_to_cur(row, col);
+        }
+    }
+    if (!homography.allFinite() || std::abs(homography(2, 2)) <= kHomographyScaleEps)
+    {
+        return delta;
+    }
+
+    // Euclidean homography M = K^-1 H K = R21 + (t21/d) n1^T (see the header for the full derivation).
+    const Eigen::Matrix3d euclidean = intrinsic.inverse() * homography * intrinsic;
+    if (!euclidean.allFinite())
+    {
+        return delta;
+    }
+    // Isolate the rank-1 translation term and recover t21/d by right-multiplying with the unit normal.
+    const Eigen::Vector3d translation_over_depth = (euclidean - rotation_c2_c1) * normal_unit;
+    if (!translation_over_depth.allFinite())
+    {
+        return delta;
+    }
+
+    delta.ok = true;
+    delta.rotation_c2_c1 = rotation_c2_c1;
+    delta.translation_over_depth = translation_over_depth.norm();
+    if (delta.translation_over_depth > kMinTranslationMm)
+    {
+        delta.unit_translation_c2 = translation_over_depth / delta.translation_over_depth;
+    }
+    return delta;
+}
+
 }  // namespace ORB_SLAM3

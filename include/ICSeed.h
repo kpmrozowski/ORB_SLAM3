@@ -91,6 +91,31 @@ struct ICSeedResult
 ICSeedResult ICBuildSeed(const ICSeedInput& input, const cv::Mat1b& undistorted_ref,
                          const cv::Mat1b& undistorted_cur);
 
+/** Relative camera pose recovered from a cascade homography (used constructively as a tracking prior).
+ *  `rotation_c2_c1` is R21 (cur-cam <- ref-cam); `unit_translation_c2` is the t21 DIRECTION in cur-cam
+ *  coordinates; `translation_over_depth` = |t21| / d is the unitless metric magnitude (fraction of the
+ *  plane depth). Callers apply the rotation directly and rescale the direction to their own (map-scale)
+ *  translation magnitude — the homography alone fixes rotation + translation direction, never map scale. */
+struct ICPoseDelta
+{
+    bool ok = false;
+    Eigen::Matrix3d rotation_c2_c1 = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d unit_translation_c2 = Eigen::Vector3d::Zero();
+    double translation_over_depth = 0.0;
+};
+
+/** Decompose a ref->cur undistorted-domain (P==K) pixel homography against the seed's ground plane.
+ *
+ *  Algebra: a planar homography in the undistorted pixel domain is H = K (R21 + t21 n1^T / d) K^-1, so
+ *  the Euclidean homography M = K^-1 H K = R21 + (t21/d) n1^T. With the plane normal n1 (unit, ref-cam)
+ *  and rotation R21 both KNOWN from the IMU seed (gravity + gyro), the rank-1 term is isolated and, since
+ *  n1 is unit, right-multiplying by n1 recovers the translation directly:
+ *      (M - R21) n1 = (t21/d)(n1^T n1) = t21 / d.
+ *  We return R21 unchanged, the unit direction of t21/d, and its norm |t21|/d. Never throws; `ok=false`
+ *  on any degeneracy (non-finite M, unusable normal). */
+ICPoseDelta ICDecomposeHomographyToPose(const cv::Mat1d& homography_ref_to_cur, const Eigen::Matrix3d& intrinsic,
+                                        const Eigen::Matrix3d& rotation_c2_c1, const Eigen::Vector3d& plane_normal_c1);
+
 }  // namespace ORB_SLAM3
 
 #endif  // ICSEED_H
