@@ -82,6 +82,32 @@ public:
         return *middle;
     }
 
+    /** Central-difference climb rate [m/s] at t over a symmetric window; 0 if unavailable (ICSeed). */
+    double ClimbRateAt(const double timeSec, const double windowSec) const
+    {
+        double altitudeHi = 0.0;
+        double altitudeLo = 0.0;
+        const double halfWindow = 0.5 * windowSec;
+        if (windowSec <= 0.0 || !AltitudeAt(timeSec + halfWindow, altitudeHi) ||
+            !AltitudeAt(timeSec - halfWindow, altitudeLo))
+        {
+            return 0.0;
+        }
+        return (altitudeHi - altitudeLo) / windowSec;
+    }
+
+    /** Above-takeoff-datum altitude [m] at t; false if the record does not cover t (ICSeed AGL). */
+    bool AglAt(const double timeSec, double& agl) const
+    {
+        double altitude = 0.0;
+        if (!AltitudeAt(timeSec, altitude))
+        {
+            return false;
+        }
+        agl = altitude - mTakeoffDatum;
+        return true;
+    }
+
 
 private:
     BaroFusion() : mSigma(1.0), mGate(15.0)
@@ -117,14 +143,31 @@ private:
             mTimesSec.push_back(std::stod(line.substr(0, comma)) * 1e-9);
             mAltitudes.push_back(std::stod(line.substr(comma + 1)));
         }
+        // Takeoff datum for above-ground-level: median altitude over the first ~2 s of the record.
+        if (!mTimesSec.empty())
+        {
+            std::vector<double> early;
+            const double cutoffSec = mTimesSec.front() + 2.0;
+            for (size_t i = 0; i < mTimesSec.size() && mTimesSec[i] <= cutoffSec; ++i)
+            {
+                early.push_back(mAltitudes[i]);
+            }
+            if (early.empty())
+            {
+                early.push_back(mAltitudes.front());
+            }
+            std::sort(early.begin(), early.end());
+            mTakeoffDatum = early[early.size() / 2];
+        }
         std::cout << "BaroFusion: " << mTimesSec.size() << " baro samples from " << csvPath
-                  << " sigma " << mSigma << " m" << std::endl;
+                  << " sigma " << mSigma << " m, takeoff datum " << mTakeoffDatum << " m" << std::endl;
     }
 
     std::vector<double> mTimesSec;
     std::vector<double> mAltitudes;
     double mSigma;
     double mGate;
+    double mTakeoffDatum = 0.0;
 };
 
 /** Unary barometric-altitude constraint on the body z of a VertexPose. */
