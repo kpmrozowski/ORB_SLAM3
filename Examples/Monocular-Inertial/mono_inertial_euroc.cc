@@ -31,6 +31,8 @@
 #include<System.h>
 #include "ImuTypes.h"
 
+#include <MemoryGovernor.h>
+
 using namespace std;
 
 void LoadImages(const string &strImagePath, const string &strPathTimes,
@@ -276,9 +278,12 @@ int main(int argc, char *argv[])
         }
     }
     const double coverage_pct = tot_images > 0 ? 100.0 * static_cast<double>(saved_poses) / tot_images : 0.0;
+    // Peak RSS across the whole run, in MB (VmHWM read directly from /proc/self/status).
+    const long peak_rss_mb = ORB_SLAM3::MemoryGovernor::ReadVmHwmKb() / 1024;
     cout << "RUN SUMMARY: coverage " << saved_poses << "/" << tot_images << " poses ("
          << std::fixed << std::setprecision(2) << coverage_pct << "%) "
-         << (bDiverged ? "[DIVERGED-ABORT]" : "[COMPLETE]") << endl;
+         << (bDiverged ? "[DIVERGED-ABORT]" : "[COMPLETE]")
+         << " peakRSS_mb=" << peak_rss_mb << endl;
 
     return 0;
 }

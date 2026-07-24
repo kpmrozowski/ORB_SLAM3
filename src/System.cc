@@ -33,6 +33,8 @@
 #include <boost/archive/xml_iarchive.hpp>
 #include <boost/archive/xml_oarchive.hpp>
 
+#include <MemoryGovernor.h>
+
 namespace ORB_SLAM3
 {
 
@@ -181,6 +183,12 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
     if (mSensor==IMU_STEREO || mSensor==IMU_MONOCULAR || mSensor==IMU_RGBD)
         mpAtlas->SetInertialSensor();
+
+    // Stats-only hook (Task P0): lets MemoryGovernor::AppendStats() read live KF/MP/map counts
+    // through the Atlas. Harmless to set unconditionally — AppendStats() guards every Atlas read
+    // behind this pointer being non-null, and deterministic single-threaded mode is the only mode
+    // the stats CSV runs in per the plan.
+    MemoryGovernor::Instance().SetAtlas(mpAtlas);
 
     //Create Drawers. These are used by the Viewer
     mpFrameDrawer = new FrameDrawer(mpAtlas);

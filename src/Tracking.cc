@@ -47,6 +47,8 @@
 
 #include "BaroFusion.h"
 
+#include <MemoryGovernor.h>
+
 
 using namespace std;
 
@@ -1715,6 +1717,7 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
     append_frame_stats(timestamp, static_cast<int>(mState), mCurrentFrame.N, mnMatchesInliers, grab_ms,
                        mCurrentFrame.mnFeatDetInitTh, mCurrentFrame.mnFeatDetUsedTh,
                        mCurrentFrame.mnFinalThFAST);
+    MemoryGovernor::Instance().AppendStats(timestamp);
 
     return mCurrentFrame.GetPose();
 }
