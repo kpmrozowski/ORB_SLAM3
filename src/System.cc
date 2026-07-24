@@ -20,6 +20,10 @@
 
 #include "System.h"
 #include "Converter.h"
+#include "G2oTypes.h"
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <pangolin/pangolin.h>
 #include <iomanip>
@@ -38,6 +42,65 @@
 namespace ORB_SLAM3
 {
 
+namespace
+{
+/** TEST-ONLY determinism canary (Task P0.5) — never set in production runs.
+ *
+ * ORB_DET_CANARY=<bytes>[,free]: allocate <bytes> via raw malloc at a fixed early point
+ * (first statement of the System constructor, before vocabulary load) to perturb the heap
+ * layout of every allocation made afterwards. Default: the block is retained for the whole
+ * process lifetime (models a persistent allocation, e.g. the P0 ofstream-buffer incident).
+ * With the ",free" suffix the constructor frees the block right after the vocabulary has
+ * loaded (models the free-after-use allocation pattern P1/P3 introduce by design).
+ *
+ * This is the P0.5 oracle: the deterministic trajectory md5 must be bit-identical with the
+ * canary unset, =64, =1048576 and =1048576,free. Raw malloc/free is deliberate — the knob
+ * must talk to the allocator directly, exactly like the allocations it models. Zero cost
+ * when unset. */
+void* AllocateDeterminismCanary(bool& free_after_vocabulary_load)
+{
+    free_after_vocabulary_load = false;
+    const char* const canary_env = std::getenv("ORB_DET_CANARY");
+    if (canary_env == nullptr)
+    {
+        return nullptr;
+    }
+    char* suffix = nullptr;
+    const unsigned long canary_bytes = std::strtoul(canary_env, &suffix, 10);
+    if (canary_bytes == 0UL)
+    {
+        return nullptr;
+    }
+    free_after_vocabulary_load = (suffix != nullptr) && (std::strcmp(suffix, ",free") == 0);
+    void* const canary_block = std::malloc(canary_bytes);
+    if (canary_block != nullptr)
+    {
+        std::memset(canary_block, 0xA5, canary_bytes);
+    }
+    std::cout << "ORB_DET_CANARY: " << canary_bytes << " bytes allocated"
+              << (free_after_vocabulary_load ? " (will free after vocabulary load)"
+                                             : " (retained forever)")
+              << std::endl;
+    return canary_block;
+}
+
+/** ORB_DET_DEBUG bisection helper (Task P0.5): FNV-1a over raw bytes. Full-precision state
+ *  fingerprints (floats/doubles hashed bit-exactly — print rounding hides last-bit drift). */
+std::uint64_t DetHashBytes(const void* const data, const std::size_t num_bytes,
+                           const std::uint64_t seed)
+{
+    const unsigned char* const bytes = static_cast<const unsigned char*>(data);
+    std::uint64_t hash = seed;
+    for (std::size_t index = 0U; index < num_bytes; ++index)
+    {
+        hash = (hash ^ static_cast<std::uint64_t>(bytes[index])) * 1099511628211ULL;
+    }
+    return hash;
+}
+
+constexpr std::uint64_t kDetHashSeed = 1469598103934665603ULL;
+}  // namespace
+
 Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
@@ -46,6 +109,11 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mbForceNewMap(false),
     mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
 {
+    // TEST-ONLY determinism canary (Task P0.5): must be the first statement so the heap
+    // perturbation happens at a fixed point before any other constructor allocation.
+    bool canary_free_after_vocabulary_load = false;
+    void* const canary_block = AllocateDeterminismCanary(canary_free_after_vocabulary_load);
+
     // Output welcome message
     cout << endl <<
     "ORB-SLAM3 Copyright (C) 2017-2020 Carlos Campos, Richard Elvira, Juan J. Gómez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
@@ -180,6 +248,13 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         //usleep(10*1000*1000);
     }
 
+    // TEST-ONLY determinism canary (Task P0.5), ",free" variant: release the block right
+    // after vocabulary load (both branches above have loaded it by this point).
+    if (canary_block != nullptr && canary_free_after_vocabulary_load)
+    {
+        std::free(canary_block);
+        cout << "ORB_DET_CANARY: block freed after vocabulary load" << endl;
+    }
 
     if (mSensor==IMU_STEREO || mSensor==IMU_MONOCULAR || mSensor==IMU_RGBD)
         mpAtlas->SetInertialSensor();
@@ -531,6 +606,76 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
                    static_cast<int>(mpTracker->mCurrentFrame.N),
                    static_cast<long>(currentMap->KeyFramesInMap()),
                    static_cast<long>(currentMap->MapPointsInMap()));
+
+            // P0.5 bisection: bit-exact component fingerprints of the full tracker/map state
+            // (the %.9e prints above round floats; last-bit double drift hides below them).
+            const Frame& current_frame = mpTracker->mCurrentFrame;
+            std::uint64_t pose_hash = 0ULL;
+            if (current_frame.HasPose())
+            {
+                const Eigen::Matrix4f pose_matrix = current_frame.GetPose().matrix();
+                pose_hash = DetHashBytes(pose_matrix.data(), 16U * sizeof(float), kDetHashSeed);
+            }
+            std::uint64_t velocity_hash = 0ULL;
+            if (current_frame.HasVelocity())
+            {
+                const Eigen::Vector3f frame_velocity = current_frame.GetVelocity();
+                velocity_hash = DetHashBytes(frame_velocity.data(), 3U * sizeof(float), kDetHashSeed);
+            }
+            const IMU::Bias frame_bias = current_frame.mImuBias;
+            const float bias_values[6] = {frame_bias.bax, frame_bias.bay, frame_bias.baz,
+                                          frame_bias.bwx, frame_bias.bwy, frame_bias.bwz};
+            const std::uint64_t bias_hash = DetHashBytes(bias_values, sizeof(bias_values), kDetHashSeed);
+            std::uint64_t prior_hash = 0ULL;
+            if (current_frame.mpcpi != nullptr)
+            {
+                prior_hash = DetHashBytes(current_frame.mpcpi->Rwb.data(), 9U * sizeof(double), kDetHashSeed);
+                prior_hash = DetHashBytes(current_frame.mpcpi->twb.data(), 3U * sizeof(double), prior_hash);
+                prior_hash = DetHashBytes(current_frame.mpcpi->vwb.data(), 3U * sizeof(double), prior_hash);
+                prior_hash = DetHashBytes(current_frame.mpcpi->bg.data(), 3U * sizeof(double), prior_hash);
+                prior_hash = DetHashBytes(current_frame.mpcpi->ba.data(), 3U * sizeof(double), prior_hash);
+                prior_hash = DetHashBytes(current_frame.mpcpi->H.data(), 225U * sizeof(double), prior_hash);
+            }
+            std::uint64_t match_hash = kDetHashSeed;
+            for (std::size_t point_index = 0U; point_index < current_frame.mvpMapPoints.size(); ++point_index)
+            {
+                MapPoint* const matched_point = current_frame.mvpMapPoints[point_index];
+                if (matched_point != nullptr)
+                {
+                    const long match_values[3] = {static_cast<long>(point_index),
+                                                  static_cast<long>(matched_point->mnId),
+                                                  static_cast<long>(point_index < current_frame.mvbOutlier.size()
+                                                                        ? current_frame.mvbOutlier[point_index]
+                                                                        : 0)};
+                    match_hash = DetHashBytes(match_values, sizeof(match_values), match_hash);
+                }
+            }
+            std::uint64_t keyframes_hash = kDetHashSeed;
+            const std::vector<KeyFrame*> all_keyframes = currentMap->GetAllKeyFrames();
+            for (KeyFrame* const keyframe : all_keyframes)
+            {
+                if (keyframe == nullptr || keyframe->isBad())
+                {
+                    continue;
+                }
+                const long keyframe_id = static_cast<long>(keyframe->mnId);
+                keyframes_hash = DetHashBytes(&keyframe_id, sizeof(keyframe_id), keyframes_hash);
+                const Eigen::Matrix4f keyframe_pose = keyframe->GetPose().matrix();
+                keyframes_hash = DetHashBytes(keyframe_pose.data(), 16U * sizeof(float), keyframes_hash);
+                const Eigen::Vector3f keyframe_velocity = keyframe->GetVelocity();
+                keyframes_hash = DetHashBytes(keyframe_velocity.data(), 3U * sizeof(float), keyframes_hash);
+                const IMU::Bias keyframe_bias = keyframe->GetImuBias();
+                const float keyframe_bias_values[6] = {keyframe_bias.bax, keyframe_bias.bay, keyframe_bias.baz,
+                                                       keyframe_bias.bwx, keyframe_bias.bwy, keyframe_bias.bwz};
+                keyframes_hash = DetHashBytes(keyframe_bias_values, sizeof(keyframe_bias_values), keyframes_hash);
+            }
+            printf("DETFRM2 %.6f pose=%016llx vel=%016llx bias=%016llx prior=%016llx match=%016llx kfs=%016llx\n",
+                   timestamp, static_cast<unsigned long long>(pose_hash),
+                   static_cast<unsigned long long>(velocity_hash),
+                   static_cast<unsigned long long>(bias_hash),
+                   static_cast<unsigned long long>(prior_hash),
+                   static_cast<unsigned long long>(match_hash),
+                   static_cast<unsigned long long>(keyframes_hash));
         }
     }
 

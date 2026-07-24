@@ -106,7 +106,17 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
-    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
+    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL)),
+    // P0.5 determinism hardening: mnFramesToResetIMU was only ever assigned on the legacy
+    // (no-Settings) config path (see `mnFramesToResetIMU = mMaxFrames` below); with a
+    // File.version-1.0 settings file it stayed UNINITIALIZED and read whatever the heap held
+    // — reliably 0 only because the Tracking object happens to land on fresh (zero) pages.
+    // Proven by bisection (task P0.5): under MALLOC_PERTURB_ the garbage value keeps
+    // `mnId <= mnLastRelocFrameId + mnFramesToResetIMU` true forever and the tracker never
+    // enters inertial pose optimization. 0 pins the de-facto behaviour every baseline and
+    // tuning of this fork was recorded with (upstream would use mMaxFrames; changing the
+    // value is a behaviour change out of P0.5's scope). The legacy path still overrides it.
+    mnFramesToResetIMU(0), mnMatchesInliers(0)
 {
     // Load camera parameters from settings file
     if(settings){

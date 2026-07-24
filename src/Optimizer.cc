@@ -2940,6 +2940,8 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
             cout << "ERROR building inertial edge" << endl;
     }
 
+    const long detEdgesAfterInertial = static_cast<long>(optimizer.edges().size());  // P0.5 bisection
+
     // Barometric altitude edges (env ORB_BARO_CSV) on the optimizable keyframes, anchored to the
     // newest fixed keyframe (accepted past) so vertical drift is corrected, not re-centred away.
     if (BaroFusion::Instance().Enabled() && pCurrentMap->isImuInitialized())
@@ -2949,6 +2951,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
         const std::vector<KeyFrame*> vpBaroAnchors(lFixedKeyFrames.begin(), lFixedKeyFrames.end());
         AddBaroEdges(optimizer, vpBaroKFs, vpBaroAnchors);
     }
+    const long detEdgesAfterBaro = static_cast<long>(optimizer.edges().size());  // P0.5 bisection
 
     // Magnetometer yaw edges (env ORB_MAG_CSV) on the optimizable keyframes, anchored to the
     // newest fixed keyframe (accepted past) so yaw drift is corrected, not re-centred away.
@@ -2961,6 +2964,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
         const std::vector<KeyFrame*> vpMagAnchors(lFixedKeyFrames.begin(), lFixedKeyFrames.end());
         AddMagYawEdges(optimizer, vpMagKFs, vpMagAnchors);
     }
+    const long detEdgesAfterMag = static_cast<long>(optimizer.edges().size());  // P0.5 bisection
 
     // Set MapPoint vertices
     const int nExpectedSize = (N+lFixedKeyFrames.size())*lLocalMapPoints.size();
@@ -3139,8 +3143,11 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
 
     if (getenv("ORB_DET_DEBUG"))
     {
-        printf("DETLBA kf=%ld nedges=%ld nverts=%ld\n", (long)pKF->mnId,
-               (long)optimizer.edges().size(), (long)optimizer.vertices().size());
+        printf("DETLBA kf=%ld nedges=%ld nverts=%ld inert=%ld baro=%ld mag=%ld mono=%ld\n",
+               (long)pKF->mnId, (long)optimizer.edges().size(), (long)optimizer.vertices().size(),
+               detEdgesAfterInertial, detEdgesAfterBaro - detEdgesAfterInertial,
+               detEdgesAfterMag - detEdgesAfterBaro,
+               (long)optimizer.edges().size() - detEdgesAfterMag);
     }
     optimizer.initializeOptimization();
     optimizer.computeActiveErrors();
@@ -5472,7 +5479,22 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
     for(size_t it=0; it<4; it++)
     {
         optimizer.initializeOptimization(0);
+        if (it == 0 && getenv("ORB_DET_DEBUG"))
+        {
+            // P0.5 bisection: pre-solve chi2 = pure function of the input graph (initial
+            // estimates + measurements) — separates input divergence from solver divergence.
+            optimizer.computeActiveErrors();
+            printf("DETPIOI LastFrame t=%.6f pre nMono=%d chi2=%.17g\n", pFrame->mTimeStamp,
+                   nInitialMonoCorrespondences, optimizer.activeChi2());
+        }
         optimizer.optimize(its[it]);
+        if (getenv("ORB_DET_DEBUG"))
+        {
+            // P0.5 bisection: bit-level per-iteration trace (idempotent recompute, debug-only).
+            optimizer.computeActiveErrors();
+            printf("DETPIOI LastFrame t=%.6f it=%ld nMono=%d chi2=%.17g\n", pFrame->mTimeStamp,
+                   static_cast<long>(it), nInitialMonoCorrespondences, optimizer.activeChi2());
+        }
 
         nBad=0;
         nBadMono = 0;

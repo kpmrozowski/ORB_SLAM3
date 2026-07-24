@@ -3,6 +3,11 @@
 Recorded 2026-07-24 by Task W0. All P0-P4 md5 gates compare against the md5s in this file,
 **running the worktree binary via `eval_fast/run_flight.sh`** (see "md5-gate scope" below).
 
+> **P0.5 re-baseline in effect:** the canonical md5s/coverage/RSS for P1+ are in the
+> "P0.5 re-baseline" section at the end of this file. The W0 tables below are kept as
+> pre-P0.5 history (they were recorded with a binary whose trajectory depended on
+> uninitialized-heap luck — see `.superpowers/sdd/task-P0.5-report.md`).
+
 ## Provenance
 
 | item | value |
@@ -95,3 +100,47 @@ before W0 started.
   proven bit-stable.
 * **Cross-tree comparisons (worktree vs main checkout / campaign binaries) must use J-score / trajectory
   metrics, never md5.** This includes the final-integration gate.
+
+## P0.5 re-baseline (2026-07-24, `p0.5-det-alloc-invariance`) — CANONICAL for P1+
+
+P0.5 made the deterministic trajectory **allocation-invariant** (see
+`.superpowers/sdd/task-P0.5-report.md`): two classes of never-written-member reads were fixed
+(`Tracking::mnFramesToResetIMU` on the Settings config path, and the `MapPoint` track-scratch
+family — `mTrackDepth` garbage used to decide the inertial optimizers' close-point chi2
+branch). This is a one-time, expected md5 shift; the W0 rows above are pre-P0.5 history.
+
+Acceptance matrix (all bit-identical, `eval_runs/p05v2_*`): {none ×2, `ORB_DET_CANARY`=64,
+=1048576, =1048576,free} ∪ {`MALLOC_PERTURB_`=1, =2} ∪ {`ORB_MEM_STATS_CSV`=on × {no canary,
+canary 1MB}} — nine runs, one distinct f_ md5, one distinct kf_ md5. `MALLOC_PERTURB_=1` is
+the recommended cheap defensive companion gate for P1+ (flips every never-written malloc
+byte; would have caught both P0.5 defects).
+
+### Fast md5 gate (canonical for P1+)
+
+| quantity | value |
+|---|---|
+| f_ md5 | `6d588726ce556625c924b1a43a72a5c8` |
+| kf_ md5 | `eda1f7a384a4735906817d7d14a28371` |
+| coverage | `772/800 poses (96.50%) [COMPLETE]` (unchanged vs W0) |
+| peak VmHWM | ~915-925 MB (unchanged range) |
+| reproducibility | nine-run acceptance matrix bit-identical (incl. none ×2) |
+
+### Full-flight baselines (canonical for P1+; runs `eval_runs/p05v2_base_*`)
+
+| flight | NF | f_ md5 | kf_ md5 | peak VmHWM | median CPU (5s) | wall | coverage (RUN SUMMARY) |
+|---|---|---|---|---|---|---|---|
+| 212_golem27 | 2500 | `875680f64df9813ea7bddc0a8a10157b` | `2f2b9b7a2bb1cf8f238bafd911551bab` | **2442 MB** | 65.3% (max 95.0) | 1363 s | `coverage 4110/4138 poses (99.32%) [COMPLETE]` (identical coverage to W0) |
+| 182_golem27 | 2500 | `80ab36499829d29deeefbe2b827e3179` | `c08508fb187f6b666ae6fc8137cd094a` | **998 MB** | 66.6% (max 100.2) | 281 s | `coverage 887/3074 poses (28.85%) [DIVERGED-ABORT]` (abort at frame 910 / KF 470; W0: frame 747 / 23.55% — the old abort point was partly uninitialized-heap luck) |
+| 182_golem27 | 5000 | `97690758aff4146fa2ed355540150192` | `b9f92562d136dce1ba2dabbf232a7bcd` | **3256 MB** | 78.2% (max 100.2) | 1393 s | `coverage 3029/3074 poses (98.54%) [COMPLETE]` (identical coverage to W0) |
+
+Notes:
+* Runs of 2026-07-24 ~20:05-20:55 CEST, three in parallel, `nice -n 10`, light machine load
+  (wall/CPU not directly comparable to the contention-inflated W0 numbers; determinism
+  unaffected).
+* 212@2500 and 182@5000 reproduce their W0 coverage EXACTLY (same pose counts) — the fixes
+  do not change healthy-run tracking outcomes on the gate flights. 182@2500 remains
+  DIVERGED-ABORT (its baseline behaviour) but aborts later (frame 747 → 910, 23.55% →
+  28.85%): the old abort point depended on uninitialized-heap garbage, which P0.5 removed;
+  flagged in the P0.5 report per the >1%-coverage rule.
+* Peak VmHWM: 212@2500 2442MB (W0 2494), 182@2500 998MB (W0 928; runs 163 frames longer),
+  182@5000 3256MB (W0 3231, +0.8%).

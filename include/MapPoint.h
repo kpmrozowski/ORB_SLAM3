@@ -29,6 +29,7 @@
 #include "SerializationUtils.h"
 
 #include <opencv2/core/core.hpp>
+#include <limits>
 #include <mutex>
 
 #include <boost/serialization/serialization.hpp>
@@ -168,16 +169,34 @@ public:
     long int mnFirstFrame;
     int nObs;
 
-    // Variables used by the tracking
-    float mTrackProjX;
-    float mTrackProjY;
-    float mTrackDepth;
-    float mTrackDepthR;
-    float mTrackProjXR;
-    float mTrackProjYR;
-    bool mbTrackInView, mbTrackInViewR;
-    int mnTrackScaleLevel, mnTrackScaleLevelR;
-    float mTrackViewCos, mTrackViewCosR;
+    // Variables used by the tracking.
+    //
+    // P0.5 determinism hardening: these are per-frame scratch fields written by
+    // Frame::isInFrustum and read by the matchers AND by the inertial optimizers'
+    // close-point classification (`bClose = mTrackDepth < 10.f` in LocalInertialBA and
+    // PoseInertialOptimizationLast{Frame,KeyFrame}). A freshly created MapPoint reaches
+    // those reads BEFORE any isInFrustum call, so without initializers the decision read
+    // raw heap memory — reliably 0 only when the object happened to land on fresh (zero)
+    // pages, and arbitrary recycled-chunk garbage otherwise. Proven by bisection (task
+    // P0.5, kf=13/kf=26 LBA erase-set divergence under ORB_DET_CANARY / MALLOC_PERTURB_).
+    //
+    // mTrackDepth is pinned to +infinity, NOT 0: a never-projected point has UNKNOWN depth,
+    // so it must take the strict (non-close) chi2 branch. This also matches the de-facto
+    // majority behaviour of the pre-fix binary (after heap warm-up most fresh MapPoints
+    // landed on recycled chunks whose garbage read as > 10). Pinning 0 instead (bClose=true,
+    // relaxed threshold for every fresh triangulation) was measured to destabilize flight
+    // 182's post-VIBA2 phase (DIVERGED-ABORT at 13-14% coverage at BOTH NF=2500 and
+    // NF=5000, vs 23.55%/98.54% baselines). Any defined value is allocation-invariant;
+    // the value choice is a tracking-behaviour decision, documented in task-P0.5-report.md.
+    float mTrackProjX = 0.0f;
+    float mTrackProjY = 0.0f;
+    float mTrackDepth = std::numeric_limits<float>::infinity();
+    float mTrackDepthR = std::numeric_limits<float>::infinity();
+    float mTrackProjXR = 0.0f;
+    float mTrackProjYR = 0.0f;
+    bool mbTrackInView = false, mbTrackInViewR = false;
+    int mnTrackScaleLevel = 0, mnTrackScaleLevelR = 0;
+    float mTrackViewCos = 0.0f, mTrackViewCosR = 0.0f;
     long unsigned int mnTrackReferenceForFrame;
     long unsigned int mnLastFrameSeen;
 

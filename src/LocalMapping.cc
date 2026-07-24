@@ -145,6 +145,10 @@ static void DetPrintMapFingerprint(Atlas* pAtlas, KeyFrame* pKF, const char* sta
     }
     double sum = 0.0;
     long count = 0;
+    // P0.5 bisection: obs-graph fingerprint — MP positions alone (possum) do not cover the
+    // observation lists / per-KF match slots that decide BA edge construction.
+    unsigned long long obsHash = 1469598103934665603ULL;
+    long obsCount = 0;
     const std::vector<MapPoint*> allPoints = pAtlas->GetCurrentMap()->GetAllMapPoints();
     for (MapPoint* pMP : allPoints)
     {
@@ -155,9 +159,48 @@ static void DetPrintMapFingerprint(Atlas* pAtlas, KeyFrame* pKF, const char* sta
         const Eigen::Vector3f pos = pMP->GetWorldPos();
         sum += static_cast<double>(pos.x()) + static_cast<double>(pos.y()) + static_cast<double>(pos.z());
         count++;
+        const std::map<KeyFrame*, std::tuple<int, int>, IdLess> observations = pMP->GetObservations();
+        for (std::map<KeyFrame*, std::tuple<int, int>, IdLess>::const_iterator obsIt = observations.begin();
+             obsIt != observations.end(); ++obsIt)
+        {
+            const long values[4] = {static_cast<long>(pMP->mnId),
+                                    static_cast<long>(obsIt->first->mnId),
+                                    static_cast<long>(std::get<0>(obsIt->second)),
+                                    static_cast<long>(std::get<1>(obsIt->second))};
+            const unsigned char* bytes = reinterpret_cast<const unsigned char*>(values);
+            for (size_t byteIdx = 0; byteIdx < sizeof(values); ++byteIdx)
+            {
+                obsHash = (obsHash ^ bytes[byteIdx]) * 1099511628211ULL;
+            }
+            obsCount++;
+        }
     }
-    printf("DETMAP kf=%ld %s nMP=%ld possum=%.17g\n",
-           static_cast<long>(pKF->mnId), stage, count, sum);
+    unsigned long long slotHash = 1469598103934665603ULL;
+    const std::vector<KeyFrame*> allKFs = pAtlas->GetCurrentMap()->GetAllKeyFrames();
+    for (KeyFrame* pKFi : allKFs)
+    {
+        if (!pKFi || pKFi->isBad())
+        {
+            continue;
+        }
+        const std::vector<MapPoint*> slots = pKFi->GetMapPointMatches();
+        for (size_t slotIdx = 0; slotIdx < slots.size(); ++slotIdx)
+        {
+            if (!slots[slotIdx])
+            {
+                continue;
+            }
+            const long values[3] = {static_cast<long>(pKFi->mnId), static_cast<long>(slotIdx),
+                                    static_cast<long>(slots[slotIdx]->mnId)};
+            const unsigned char* bytes = reinterpret_cast<const unsigned char*>(values);
+            for (size_t byteIdx = 0; byteIdx < sizeof(values); ++byteIdx)
+            {
+                slotHash = (slotHash ^ bytes[byteIdx]) * 1099511628211ULL;
+            }
+        }
+    }
+    printf("DETMAP kf=%ld %s nMP=%ld possum=%.17g nObs=%ld obs=%016llx slot=%016llx\n",
+           static_cast<long>(pKF->mnId), stage, count, sum, obsCount, obsHash, slotHash);
 }
 
 void LocalMapping::ProcessQueueOnce()
@@ -287,8 +330,10 @@ void LocalMapping::ProcessQueueOnce()
                 }
 
 
+                DetPrintMapFingerprint(mpAtlas, mpCurrentKeyFrame, "lba");
                 // Check redundant local Keyframes
                 KeyFrameCulling();
+                DetPrintMapFingerprint(mpAtlas, mpCurrentKeyFrame, "kfcull");
 
 #ifdef REGISTER_TIMES
                 std::chrono::steady_clock::time_point time_EndKFCulling = std::chrono::steady_clock::now();
@@ -458,6 +503,31 @@ void LocalMapping::ProcessNewKeyFrame()
 
     // Associate MapPoints to the new keyframe and update normal and descriptor
     const vector<MapPoint*> vpMapPointMatches = mpCurrentKeyFrame->GetMapPointMatches();
+
+    if (getenv("ORB_DET_DEBUG"))
+    {
+        // P0.5 bisection: fingerprint of the new KF's match slots exactly as delivered by the
+        // tracker (separates "frame match set differed" from "AddObservation differed").
+        unsigned long long slotHash = 1469598103934665603ULL;
+        long slotCount = 0;
+        for (size_t slotIdx = 0; slotIdx < vpMapPointMatches.size(); ++slotIdx)
+        {
+            if (!vpMapPointMatches[slotIdx])
+            {
+                continue;
+            }
+            const long values[2] = {static_cast<long>(slotIdx),
+                                    static_cast<long>(vpMapPointMatches[slotIdx]->mnId)};
+            const unsigned char* bytes = reinterpret_cast<const unsigned char*>(values);
+            for (size_t byteIdx = 0; byteIdx < sizeof(values); ++byteIdx)
+            {
+                slotHash = (slotHash ^ bytes[byteIdx]) * 1099511628211ULL;
+            }
+            slotCount++;
+        }
+        printf("DETNKF kf=%ld nslots=%ld slots=%016llx\n",
+               static_cast<long>(mpCurrentKeyFrame->mnId), slotCount, slotHash);
+    }
 
     for(size_t i=0; i<vpMapPointMatches.size(); i++)
     {
@@ -1210,6 +1280,14 @@ void LocalMapping::KeyFrameCulling()
             }
         }
 
+        if (getenv("ORB_DET_DEBUG"))
+        {
+            // P0.5 bisection: per-candidate culling decision inputs (the stage had no fingerprint).
+            printf("DETCULL cur=%ld cand=%ld red=%d nMPs=%d dec=%d\n",
+                   static_cast<long>(mpCurrentKeyFrame->mnId), static_cast<long>(pKF->mnId),
+                   nRedundantObservations, nMPs,
+                   static_cast<int>(nRedundantObservations > redundant_th * nMPs));
+        }
         if(nRedundantObservations>redundant_th*nMPs)
         {
             if (mbInertial)
