@@ -29,6 +29,7 @@
 
 #include<mutex>
 #include<chrono>
+#include<cstring>
 
 namespace ORB_SLAM3
 {
@@ -113,6 +114,16 @@ static int DivergeCountThreshold()
     static const int value =
         getenv("ORB_DIVERGE_COUNT") ? atoi(getenv("ORB_DIVERGE_COUNT")) : 0;
     return value > 0 ? value : 4;
+}
+// ORB_DIVERGE_ACTION: what the guard does on trigger. Unset/"stop" (default) = flag the run
+// diverged (the example binaries then stop feeding frames - stock fork behavior). "reset" =
+// request an active-map reset instead (the multi-map Atlas re-initializes and the sequence
+// continues), so a later in-flight map can still be produced instead of forfeiting the run.
+static bool DivergeActionReset()
+{
+    static const bool value =
+        getenv("ORB_DIVERGE_ACTION") && strcmp(getenv("ORB_DIVERGE_ACTION"), "reset") == 0;
+    return value;
 }
 
 static void DetPrintMapFingerprint(Atlas* pAtlas, KeyFrame* pKF, const char* stage)
@@ -476,9 +487,19 @@ void LocalMapping::ProcessNewKeyFrame()
                 std::cout << "[DIVERGE] " << consecutive_high_velocity_keyframes
                           << " consecutive KFs with |v| > " << DivergeVmax()
                           << " m/s (last " << keyframe_speed << " m/s, KF "
-                          << mpCurrentKeyFrame->mnId << ") - flagging run as diverged"
+                          << mpCurrentKeyFrame->mnId << ") - "
+                          << (DivergeActionReset() ? "requesting active-map reset"
+                                                   : "flagging run as diverged")
                           << std::endl;
-                mpSystem->SetDiverged();
+                consecutive_high_velocity_keyframes = 0;
+                if (DivergeActionReset())
+                {
+                    mpSystem->ResetActiveMap();
+                }
+                else
+                {
+                    mpSystem->SetDiverged();
+                }
             }
         }
         else
