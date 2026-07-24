@@ -191,6 +191,8 @@ void Viewer::Run()
     pangolin::Var<bool> menuShowOptLba("menu.Show LBA opt", false, true);
     pangolin::Var<bool> menuShowGpsTraj("menu.GPS[0] traj", true, true);
     pangolin::Var<bool> menuShowGpsLines("menu.GPS<->SLAM lines", true, true);
+    pangolin::Var<bool> menuShowGps1Traj("menu.GPS[1] traj", false, true);
+    pangolin::Var<bool> menuShowGps1Lines("menu.NORA<->SLAM lines", true, true);
     // Define Camera Render Object (for view / scene browsing)
     pangolin::OpenGlRenderState s_cam(
                 pangolin::ProjectionMatrix(1024,768,mViewpointF,mViewpointF,512,389,0.1,1000),
@@ -316,8 +318,8 @@ void Viewer::Run()
             mpMapDrawer->DrawKeyFrames(menuShowKeyFrames,menuShowGraph, menuShowInertialGraph, menuShowOptLba);
         if(menuShowPoints)
             mpMapDrawer->DrawMapPoints();
-        if(menuShowGpsTraj || menuShowGpsLines)
-            mpMapDrawer->DrawGPS(menuShowGpsTraj, menuShowGpsLines);
+        if(menuShowGpsTraj || menuShowGpsLines || menuShowGps1Traj || menuShowGps1Lines)
+            mpMapDrawer->DrawGPS(menuShowGpsTraj, menuShowGpsLines, menuShowGps1Traj, menuShowGps1Lines);
 
         pangolin::FinishFrame();
 

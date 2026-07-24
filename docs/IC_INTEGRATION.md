@@ -129,12 +129,37 @@ The two `escalated`/`consumed` columns are **appended** last, so column-name par
 compatible; legacy INIT/TRACK rows write `0` / `-`. One CASC row is emitted per tracked/init/rescue frame,
 flushed after the frame's state is resolved (so `r`→`R` reflects the true rescue outcome).
 
-## GPS[0] overlay (`ORB_GPS_CSV`)
+## GPS overlay (`ORB_GPS_CSV` / `ORB_GPS1_CSV`)
 
-Separate viewer-only feature (`GpsOverlay` / `MapDrawer::DrawGPS`). Reads `t_rebased_ns,e,n,u,valid`,
-aligns valid GPS to keyframes with a free `Eigen::umeyama` similarity (refit ~2 s), and draws a yellow
-trajectory line-strip, dark-yellow sample points, and bright-orange keyframe↔GPS correspondence lines.
-Two Pangolin checkboxes ("GPS[0] traj" / "GPS↔SLAM lines"). Inactive without `ORB_GPS_CSV`.
+Separate **viewer-only** feature (`GpsOverlay` / `MapDrawer::DrawGPS`) — display-only, never fed back
+into the estimator. Two independent tracks share one CSV schema `t_rebased_ns,e,n,u,valid` and one
+ENU frame:
+
+* **GPS[0]** (`ORB_GPS_CSV`) — the spoofed instance; `valid` is the unspoofed (spoof-mask) flag, so its
+  line-strip breaks across `valid==0` gaps.
+* **GPS[1]** (`ORB_GPS1_CSV`) — the trusted NORA receiver; `valid==1` everywhere, so its line-strip and
+  its correspondence lines instead break wherever consecutive samples are **> 5 s** apart (a dropout).
+
+A single free `Eigen::umeyama` similarity `T_slam_gps` (refit ~2 s of wall-clock) aligns the overlay to
+the live keyframes. The fit **source** is GPS[0] when present, and GPS[1] then **shares that exact
+transform** — deliberately exposing GPS[0]-vs-GPS[1] disagreement on spoofed segments (both CSVs are
+emitted in one shared ENU frame by `eval/hist_export_gps1_enu.py`). When GPS[0] is absent, the fit is
+computed from GPS[1]↔keyframe correspondences instead (same code path, different source), so
+GPS[0]-less flights still get a truth overlay.
+
+| Element | Color (GL) | Panel checkbox | Default |
+|---------|-----------|----------------|---------|
+| GPS[0] trajectory line-strip | yellow `(1,1,0)` | "GPS[0] traj" | ON |
+| GPS[0] sample points | dark-yellow `(0.6,0.6,0)` | "GPS[0] traj" | ON |
+| GPS[0]↔keyframe lines | bright-orange `(1,0.6,0)` | "GPS↔SLAM lines" | ON |
+| GPS[1] trajectory line-strip | light-blue `(0.35,0.75,1.0)` | "GPS[1] traj" | OFF |
+| GPS[1] sample points | muted-blue `(0.2,0.45,0.6)` | "GPS[1] traj" | OFF |
+| GPS[1]↔keyframe lines | bright-cyan `(0.5,0.9,1.0)` | "NORA↔SLAM lines" | ON |
+
+The GPS[1]↔keyframe (NORA) line for a keyframe is skipped when the nearest GPS[1] sample is > 5 s away
+(same gap discipline as the strip). Each track is fully inactive when its env var is unset; with **both**
+unset the overlay is exactly as inactive as stock. The loader prints one `GpsOverlay: N GPS[0]/GPS[1]
+samples from <path>` line per track that is set.
 
 ## Scope notes
 

@@ -397,7 +397,7 @@ void MapDrawer::DrawKeyFrames(const bool bDrawKF, const bool bDrawGraph, const b
     }
 }
 
-void MapDrawer::DrawGPS(const bool bDrawTraj, const bool bDrawLines)
+void MapDrawer::DrawGPS(const bool bDrawTraj, const bool bDrawLines, const bool bDrawTraj1, const bool bDrawLines1)
 {
     GpsOverlay& overlay = GpsOverlay::Instance();
     if(!overlay.Enabled())
@@ -458,6 +458,46 @@ void MapDrawer::DrawGPS(const bool bDrawTraj, const bool bDrawLines)
         glColor3f(1.0f,0.6f,0.0f);
         glBegin(GL_LINES);
         for(const std::pair<Eigen::Vector3f,Eigen::Vector3f>& correspondence : drawData.correspondences)
+        {
+            glVertex3f(correspondence.first(0),correspondence.first(1),correspondence.first(2));
+            glVertex3f(correspondence.second(0),correspondence.second(1),correspondence.second(2));
+        }
+        glEnd();
+    }
+
+    if(bDrawTraj1)
+    {
+        // Light-blue GPS[1] (NORA) trajectory, broken across > 5 s sample gaps.
+        glLineWidth(2.0f);
+        glColor3f(0.35f,0.75f,1.0f);
+        for(const std::vector<Eigen::Vector3f>& segment : drawData.traj1Segments)
+        {
+            glBegin(GL_LINE_STRIP);
+            for(const Eigen::Vector3f& point : segment)
+                glVertex3f(point(0),point(1),point(2));
+            glEnd();
+        }
+
+        // Muted-blue points at each GPS[1]-in-SLAM sample.
+        glPointSize(4.0f);
+        glColor3f(0.2f,0.45f,0.6f);
+        glBegin(GL_POINTS);
+        for(const std::vector<Eigen::Vector3f>& segment : drawData.traj1Segments)
+        {
+            for(const Eigen::Vector3f& point : segment)
+                glVertex3f(point(0),point(1),point(2));
+        }
+        glEnd();
+    }
+
+    if(bDrawLines1)
+    {
+        // Bright-cyan correspondence lines: keyframe centre <-> its GPS[1](NORA)-in-SLAM point
+        // (distinct from the light-blue GPS[1] strip and the orange GPS[0] lines).
+        glLineWidth(1.0f);
+        glColor3f(0.5f,0.9f,1.0f);
+        glBegin(GL_LINES);
+        for(const std::pair<Eigen::Vector3f,Eigen::Vector3f>& correspondence : drawData.correspondences1)
         {
             glVertex3f(correspondence.first(0),correspondence.first(1),correspondence.first(2));
             glVertex3f(correspondence.second(0),correspondence.second(1),correspondence.second(2));
