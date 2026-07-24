@@ -2097,10 +2097,12 @@ void Tracking::Track()
 
                         // ORB_IC_CASCADE_RESCUE: before conceding a pre-IMU-init recently-lost frame, seed a
                         // pose from the last frame via the H_best decomposition so the TrackLocalMap below can
-                        // re-lock. Fail-open: on failure bOK stays false and the stock lost path resumes.
+                        // re-lock. GATED to the IC/gyro-family winner (winner=='i') — same exactness
+                        // precondition as PRIOR (skip the lazy-ORB winner). Fail-open: on any miss bOK stays
+                        // false and the stock lost path resumes.
                         if (!bOK && ICCascadeEnabled() && ICCascadeRescueEnabled() && !pCurrentMap->isImuInitialized()
                             && (mSensor == System::IMU_MONOCULAR || mSensor == System::MONOCULAR) && mLastFrame.isSet()
-                            && ComputeICCascade(false) && mICCascade.has_plane)
+                            && ComputeICCascade(false) && mICCascade.has_plane && mICCascade.winner == 'i')
                         {
                             const ICPoseDelta delta = ICDecomposeHomographyToPose(
                                 mICCascade.h_best, mICCascade.intrinsic, mICCascade.rotation_c2_c1,
@@ -4026,11 +4028,14 @@ bool Tracking::TrackWithMotionModel()
     const bool cascadeReady = ICCascadeEnabled() && !mpAtlas->isImuInitialized() && ComputeICCascade(false);
 
     // ORB_IC_CASCADE_PRIOR: replace the stale constant-velocity prediction with an H_best-decomposed pose.
-    // Rotation comes from gyro+IC(+ORB) (H_best); translation MAGNITUDE stays map-scale (from mVelocity,
-    // the only metric-consistent magnitude pre-IMU-init) while its DIRECTION is taken from the homography
-    // decomposition when H_best carries a real translation (else the velocity translation is kept).
+    // GATED to the IC/gyro-family winner (winner=='i'): the decomposition is exact only when H_best's
+    // rotation IS the gyro R21 (see ICDecomposeHomographyToPose). When the lazy-ORB homography wins the ECC
+    // vote we SKIP the prior (fail-open to the stock velocity prediction) rather than leak its rotation
+    // residual into the recovered translation. Rotation then comes from gyro+IC (H_best); translation
+    // MAGNITUDE stays map-scale (from mVelocity, the only metric-consistent magnitude pre-IMU-init) while
+    // its DIRECTION is taken from the homography decomposition when H_best carries a real translation.
     bool priorApplied = false;
-    if (cascadeReady && ICCascadePriorEnabled() && mICCascade.has_plane)
+    if (cascadeReady && ICCascadePriorEnabled() && mICCascade.has_plane && mICCascade.winner == 'i')
     {
         const ICPoseDelta delta = ICDecomposeHomographyToPose(mICCascade.h_best, mICCascade.intrinsic,
                                                               mICCascade.rotation_c2_c1, mICCascade.plane_normal_c1);

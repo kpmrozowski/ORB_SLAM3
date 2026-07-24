@@ -112,7 +112,13 @@ struct ICPoseDelta
  *  n1 is unit, right-multiplying by n1 recovers the translation directly:
  *      (M - R21) n1 = (t21/d)(n1^T n1) = t21 / d.
  *  We return R21 unchanged, the unit direction of t21/d, and its norm |t21|/d. Never throws; `ok=false`
- *  on any degeneracy (non-finite M, unusable normal). */
+ *  on any degeneracy (non-finite M, unusable normal).
+ *
+ *  PRECONDITION: `rotation_c2_c1` MUST be the rotation actually embedded in `homography_ref_to_cur`
+ *  (the gyro seed's R21). This holds for the IMU-seed / IC-refined homography, whose rotation IS R21.
+ *  It does NOT hold for an independently fitted homography (e.g. the cascade's lazy-ORB winner): for a
+ *  rotation R_H != R21, (M - R21) n1 = (R_H - R21) n1 + t21/d leaks the rotation residual into the
+ *  recovered translation. Pose-consuming callers (PRIOR / RESCUE) must feed ONLY the gyro-family winner. */
 ICPoseDelta ICDecomposeHomographyToPose(const cv::Mat1d& homography_ref_to_cur, const Eigen::Matrix3d& intrinsic,
                                         const Eigen::Matrix3d& rotation_c2_c1, const Eigen::Vector3d& plane_normal_c1);
 

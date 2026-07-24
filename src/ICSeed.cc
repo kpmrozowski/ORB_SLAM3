@@ -245,6 +245,8 @@ ICPoseDelta ICDecomposeHomographyToPose(const cv::Mat1d& homography_ref_to_cur, 
     }
 
     // Euclidean homography M = K^-1 H K = R21 + (t21/d) n1^T (see the header for the full derivation).
+    // EXACT ONLY when H's rotation equals rotation_c2_c1 (the gyro R21): callers must pass a gyro-family
+    // (IMU-seed / IC-refined) H, never an independently fitted one (e.g. the cascade's lazy-ORB winner).
     const Eigen::Matrix3d euclidean = intrinsic.inverse() * homography * intrinsic;
     if (!euclidean.allFinite())
     {
