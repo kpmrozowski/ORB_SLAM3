@@ -119,10 +119,21 @@ static int DivergeCountThreshold()
 // diverged (the example binaries then stop feeding frames - stock fork behavior). "reset" =
 // request an active-map reset instead (the multi-map Atlas re-initializes and the sequence
 // continues), so a later in-flight map can still be produced instead of forfeiting the run.
+// "newmap" = like "reset" for young maps, but a MATURE map (VIBA2 done) is PRESERVED via a
+// forced new-map-in-atlas: a long good prefix (e.g. 405_alma231's ~280 s map that only
+// diverged at its end) stays in the atlas for trajectory saving; only the <= COUNT-KF
+// divergence ramp pollutes its tail. Trajectory saving uses the biggest map, so preserved
+// junk maps never fragment the output.
 static bool DivergeActionReset()
 {
     static const bool value =
         getenv("ORB_DIVERGE_ACTION") && strcmp(getenv("ORB_DIVERGE_ACTION"), "reset") == 0;
+    return value;
+}
+static bool DivergeActionNewMap()
+{
+    static const bool value =
+        getenv("ORB_DIVERGE_ACTION") && strcmp(getenv("ORB_DIVERGE_ACTION"), "newmap") == 0;
     return value;
 }
 
@@ -484,15 +495,23 @@ void LocalMapping::ProcessNewKeyFrame()
             ++consecutive_high_velocity_keyframes;
             if (consecutive_high_velocity_keyframes >= DivergeCountThreshold())
             {
+                const bool mature_map = mpCurrentKeyFrame->GetMap()->GetIniertialBA2();
+                const bool preserve = DivergeActionNewMap() && mature_map;
+                const bool recycle = DivergeActionReset() || DivergeActionNewMap();
                 std::cout << "[DIVERGE] " << consecutive_high_velocity_keyframes
                           << " consecutive KFs with |v| > " << DivergeVmax()
                           << " m/s (last " << keyframe_speed << " m/s, KF "
                           << mpCurrentKeyFrame->mnId << ") - "
-                          << (DivergeActionReset() ? "requesting active-map reset"
-                                                   : "flagging run as diverged")
+                          << (preserve ? "preserving mature map, forcing new map in atlas"
+                              : recycle ? "requesting active-map reset"
+                                        : "flagging run as diverged")
                           << std::endl;
                 consecutive_high_velocity_keyframes = 0;
-                if (DivergeActionReset())
+                if (preserve)
+                {
+                    mpSystem->ForceNewMapInAtlas();
+                }
+                else if (recycle)
                 {
                     mpSystem->ResetActiveMap();
                 }

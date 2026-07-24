@@ -41,6 +41,7 @@ Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
                const bool bUseViewer, const int initFr, const string &strSequence):
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
+    mbForceNewMap(false),
     mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
 {
     // Output welcome message
@@ -322,11 +323,18 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
             mpTracker->Reset();
             mbReset = false;
             mbResetActiveMap = false;
+            mbForceNewMap = false;
         }
         else if(mbResetActiveMap)
         {
             mpTracker->ResetActiveMap();
             mbResetActiveMap = false;
+        }
+        else if(mbForceNewMap)
+        {
+            cout << "SYSTEM-> Forcing new map in atlas (previous map preserved)" << endl;
+            mpTracker->CreateMapInAtlas();
+            mbForceNewMap = false;
         }
     }
 
@@ -397,11 +405,18 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
             mpTracker->Reset();
             mbReset = false;
             mbResetActiveMap = false;
+            mbForceNewMap = false;
         }
         else if(mbResetActiveMap)
         {
             mpTracker->ResetActiveMap();
             mbResetActiveMap = false;
+        }
+        else if(mbForceNewMap)
+        {
+            cout << "SYSTEM-> Forcing new map in atlas (previous map preserved)" << endl;
+            mpTracker->CreateMapInAtlas();
+            mbForceNewMap = false;
         }
     }
 
@@ -472,12 +487,19 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
             mpTracker->Reset();
             mbReset = false;
             mbResetActiveMap = false;
+            mbForceNewMap = false;
         }
         else if(mbResetActiveMap)
         {
             cout << "SYSTEM-> Reseting active map in monocular case" << endl;
             mpTracker->ResetActiveMap();
             mbResetActiveMap = false;
+        }
+        else if(mbForceNewMap)
+        {
+            cout << "SYSTEM-> Forcing new map in atlas (previous map preserved)" << endl;
+            mpTracker->CreateMapInAtlas();
+            mbForceNewMap = false;
         }
     }
 
@@ -549,6 +571,12 @@ void System::ResetActiveMap()
 {
     unique_lock<mutex> lock(mMutexReset);
     mbResetActiveMap = true;
+}
+
+void System::ForceNewMapInAtlas()
+{
+    unique_lock<mutex> lock(mMutexReset);
+    mbForceNewMap = true;
 }
 
 void System::Shutdown()

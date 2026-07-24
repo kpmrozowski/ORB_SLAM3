@@ -135,6 +135,12 @@ public:
     void Reset();
     void ResetActiveMap();
 
+    // Force Tracking to start a fresh map in the Atlas while PRESERVING the current map
+    // (consumed at the next Track* call, like the reset flags). Used by the divergence
+    // guard's ORB_DIVERGE_ACTION=newmap path for mature (VIBA2-done) diverged maps, whose
+    // long good prefix would otherwise be wiped by an active-map reset.
+    void ForceNewMapInAtlas();
+
     // All threads will be requested to finish.
     // It waits until all threads have finished.
     // This function must be called before saving the trajectory.
@@ -255,6 +261,7 @@ private:
     std::mutex mMutexReset;
     bool mbReset;
     bool mbResetActiveMap;
+    bool mbForceNewMap;
 
     // Change mode flags
     std::mutex mMutexMode;
