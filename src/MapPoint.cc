@@ -22,6 +22,11 @@
 
 #include<mutex>
 
+#include <cstdio>
+#include <cstdlib>
+
+#include <MemoryGovernor.h>
+
 namespace ORB_SLAM3
 {
 
@@ -237,6 +242,32 @@ void MapPoint::SetBadFlag()
     }
 
     mpMap->EraseMapPoint(this);
+
+    // Task P1 (memory reduction): defer the mDescriptor release to MemoryGovernor::Tick()
+    // (one-KF-tick delay). It CANNOT be released here: TrackWithMotionModel still matches
+    // against this (now bad) MapPoint's descriptor during the next frame, via the
+    // mLastFrame.mvpMapPoints pointer chain — SearchLocalPoints only scrubs bad MapPoints from
+    // the chain at that frame's TrackLocalMap. Immediate release was proven to SIGSEGV in
+    // ORBmatcher::DescriptorDistance 15s into the fast gate. Deterministic-mode + env-gated;
+    // a single static-bool-pair check otherwise.
+    if (MemoryGovernor::ReclaimBadPayloadEnabled())
+    {
+        MemoryGovernor::Instance().DeferMapPointRelease(this);
+    }
+}
+
+void MapPoint::ReleaseBadDescriptor()
+{
+    // Called by MemoryGovernor::Tick() one tick after SetBadFlag() (never directly from SLAM
+    // code). mDescriptor.clone() in ComputeDistinctiveDescriptors()/GetDescriptor() means the
+    // Mat buffer is exclusively owned by this MapPoint (no aliasing), so release() frees it.
+    unique_lock<mutex> lock(mMutexFeatures);
+    if (mbDescriptorReleased)
+    {
+        return;
+    }
+    mDescriptor.release();
+    mbDescriptorReleased = true;
 }
 
 MapPoint* MapPoint::GetReplaced()
@@ -406,6 +437,17 @@ void MapPoint::ComputeDistinctiveDescriptors()
 cv::Mat MapPoint::GetDescriptor()
 {
     unique_lock<mutex> lock(mMutexFeatures);
+    // ORB_MEM_PARANOIA (Task P1, validation-only): any descriptor read after
+    // ReleaseBadDescriptor() would silently produce an empty Mat where stock code reads real
+    // bytes (a determinism bug, and the exact class of read behind the pre-deferral SIGSEGV in
+    // ORBmatcher::DescriptorDistance) — abort loudly with the MapPoint id instead.
+    if (MemoryGovernor::ParanoiaEnabled() && mbDescriptorReleased)
+    {
+        std::fprintf(stderr,
+                     "ORB_MEM_PARANOIA: GetDescriptor() on released bad MapPoint id=%lu\n",
+                     mnId);
+        std::abort();
+    }
     return mDescriptor.clone();
 }
 

@@ -22,8 +22,42 @@
 #include "ImuTypes.h"
 #include<mutex>
 
+#include <cstdio>
+#include <cstdlib>
+
+#include <MemoryGovernor.h>
+
 namespace ORB_SLAM3
 {
+
+namespace
+{
+
+// Task P1: swaps `container` with a freshly default-constructed (zero-capacity) instance,
+// releasing any heap-allocated storage back to the allocator when the temporary is destroyed at
+// the end of this call. Works uniformly for std::vector<T>, the nested KeyFrame grid type, and
+// DBoW2's std::map-derived BowVector/FeatureVector (all expose a member swap()).
+// Container::clear() alone is insufficient here: for std::vector it empties the logical contents
+// but retains the allocated capacity, so RSS would not actually drop.
+template <typename ContainerType>
+void SwapWithEmpty(ContainerType& container)
+{
+    ContainerType empty_container;
+    container.swap(empty_container);
+}
+
+// ORB_MEM_PARANOIA: aborts with the offending KeyFrame's id and the accessor name that triggered
+// the read. Deliberately a hard abort (not an exception) -- this is a validation-only tool for a
+// dedicated flight, not a production error path.
+void AbortOnReleasedPayloadRead(const long unsigned int keyframe_id, const char* const accessor_name)
+{
+    std::fprintf(stderr,
+                 "ORB_MEM_PARANOIA: read of released payload on bad KeyFrame id=%lu via %s\n",
+                 keyframe_id, accessor_name);
+    std::abort();
+}
+
+}  // namespace
 
 long unsigned int KeyFrame::nNextId=0;
 
@@ -98,6 +132,10 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
 
 void KeyFrame::ComputeBoW()
 {
+    if (MemoryGovernor::ParanoiaEnabled() && mbPayloadReleased)
+    {
+        AbortOnReleasedPayloadRead(mnId, "ComputeBoW");
+    }
     if(mBowVec.empty() || mFeatVec.empty())
     {
         vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(mDescriptors);
@@ -693,6 +731,64 @@ void KeyFrame::SetBadFlag()
 
     mpMap->EraseKeyFrame(this);
     mpKeyFrameDB->erase(this);
+
+    // Task P1 (memory reduction): by this point `this` is unlinked from the Map, the
+    // KeyFrameDatabase inverted index, the covisibility graph and every MapPoint's observation
+    // list (all above). The heavy payload is NOT freed here but enqueued for release at the
+    // next-plus-one MemoryGovernor::Tick(): the tracker may still read a just-culled
+    // mpReferenceKF's mFeatVec/mvpMapPoints during the very next frame
+    // (TrackReferenceKeyFrame/NeedNewKeyFrame) before UpdateLocalKeyFrames reassigns it -- see
+    // MemoryGovernor.h. Deterministic-mode + env-gated; a single static-bool check otherwise.
+    if (MemoryGovernor::ReclaimBadPayloadEnabled())
+    {
+        MemoryGovernor::Instance().DeferKeyFrameRelease(this);
+    }
+}
+
+void KeyFrame::ReleaseBadPayload()
+{
+    if (mbPayloadReleased)
+    {
+        return;
+    }
+
+    // Partial release (Task P1). KEPT deliberately -- mvKeysUn, mvuRight, mvpMapPoints:
+    // stock ORB-SLAM3 leaves STALE OBSERVATIONS behind (CreateNewMapPoints can overwrite a
+    // neighbour-KF slot via AddMapPoint without erasing the overwritten MapPoint's observation
+    // -- traced live: KF35 slot 87 held MP12960, overwritten by MP12962; MP12960 kept
+    // (KF35,87) in mObservations for good). Such live MapPoints later make LOAD-BEARING
+    // reads/writes into this bad KF's arrays: KeyFrameCulling's observer loop reads
+    // mvKeysUn[idx].octave with no isBad() guard (the value feeds the redundancy count),
+    // MapPoint::SetBadFlag/Replace write mvpMapPoints slots via EraseMapPointMatch/
+    // ReplaceMapPointMatch, and MapPoint::EraseObservation reads mvuRight[idx] for its nObs
+    // accounting. Releasing those three arrays crashes (or silently changes the trajectory);
+    // full release of them arrives with P3a's guarded accessors. Everything below has NO
+    // stale-observation reader: remaining readers are isBad()-guarded
+    // (ComputeDistinctiveDescriptors, LocalBA/GBA edge builders, culling candidates) or
+    // live-/NotErase-scoped (matchers, KFDB after erase), verified per-site in
+    // task-P1-report.md.
+    SwapWithEmpty(mvKeys);
+    SwapWithEmpty(mvDepth);
+    SwapWithEmpty(mGrid);
+    SwapWithEmpty(mBowVec);
+    SwapWithEmpty(mFeatVec);
+
+    if (MemoryGovernor::ParanoiaEnabled())
+    {
+        // A released cv::Mat is 0x0 (rows==0), which several size-driven loops elsewhere treat as
+        // "nothing to do" and silently skip -- unhelpful for validation. Use a recognizable
+        // non-empty sentinel instead, so any direct read of the still-public mDescriptors field
+        // that bypasses the ComputeBoW()/GetFeaturesInArea() guards above surfaces as an obviously
+        // wrong 1x1 matrix rather than a quietly-skipped empty one.
+        mDescriptors = cv::Mat(1, 1, CV_8UC1, cv::Scalar(0xAA));
+    }
+    else
+    {
+        mDescriptors.release();
+    }
+
+    mbPayloadReleased = true;
+    MemoryGovernor::IncrementKfShellReleased();
 }
 
 bool KeyFrame::isBad()
@@ -720,6 +816,10 @@ void KeyFrame::EraseConnection(KeyFrame* pKF)
 
 vector<size_t> KeyFrame::GetFeaturesInArea(const float &x, const float &y, const float &r, const bool bRight) const
 {
+    if (MemoryGovernor::ParanoiaEnabled() && mbPayloadReleased)
+    {
+        AbortOnReleasedPayloadRead(mnId, "GetFeaturesInArea");
+    }
     vector<size_t> vIndices;
     vIndices.reserve(N);
 

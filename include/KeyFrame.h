@@ -273,6 +273,23 @@ public:
     void SetBadFlag();
     bool isBad();
 
+    // Task P1 (memory reduction): releases part of the heavy per-KF payload (mvKeys, mvDepth,
+    // mGrid, mBowVec, mFeatVec, mDescriptors) back to the allocator via the swap-with-empty
+    // idiom. NOT called from SetBadFlag() directly — the tracker may still read a just-culled
+    // reference KF's payload for one more frame (stock behaviour), so SetBadFlag() enqueues
+    // into MemoryGovernor and the governor calls this one KF-tick later (see MemoryGovernor.h).
+    // KEEPS mvKeysUn/mvuRight/mvpMapPoints: stock's observation graph carries stale
+    // observations (neighbour-slot overwrite in CreateNewMapPoints without erasing the
+    // overwritten MapPoint's observation), through which live MapPoints make load-bearing
+    // reads/writes into bad KFs — full release of those three needs P3a's guarded accessors
+    // (see the comment inside ReleaseBadPayload()). Also KEEPS poses/mTcp/mpParent/
+    // mspChildrens/flags/mpImuPreintegrated — trajectory saving and spanning-tree reparenting
+    // read only those from bad KeyFrames. Idempotent (guarded by mbPayloadReleased). See
+    // task-P1-report.md for the per-field reader audit and the const-removal note (mvKeys/
+    // mvKeysUn/mvuRight/mvDepth/mDescriptors were declared const; ReleaseBadPayload() is the
+    // sole sanctioned post-construction mutator).
+    void ReleaseBadPayload();
+
     // Compute Scene Depth (q=2 median). Used in monocular.
     float ComputeSceneMedianDepth(const int q);
 
@@ -378,12 +395,17 @@ public:
     // Number of KeyPoints
     const int N;
 
-    // KeyPoints, stereo coordinate and descriptors (all associated by an index)
-    const std::vector<cv::KeyPoint> mvKeys;
-    const std::vector<cv::KeyPoint> mvKeysUn;
-    const std::vector<float> mvuRight; // negative value for monocular points
-    const std::vector<float> mvDepth; // negative value for monocular points
-    const cv::Mat mDescriptors;
+    // KeyPoints, stereo coordinate and descriptors (all associated by an index).
+    // Task P1: NOT const (was const in upstream ORB-SLAM3) -- KeyFrame::ReleaseBadPayload()
+    // swaps these to empty once a KeyFrame goes bad, to actually free the payload. Nothing
+    // outside KeyFrame ever writes them (every other call site only reads), so this is safe;
+    // read-only external access is unaffected since a non-const member binds fine to a const
+    // reference/parameter everywhere it is currently read.
+    std::vector<cv::KeyPoint> mvKeys;
+    std::vector<cv::KeyPoint> mvKeysUn;
+    std::vector<float> mvuRight; // negative value for monocular points
+    std::vector<float> mvDepth; // negative value for monocular points
+    cv::Mat mDescriptors;
 
     //BoW
     DBoW2::BowVector mBowVec;
@@ -479,7 +501,15 @@ protected:
     // Bad flags
     bool mbNotErase;
     bool mbToBeErased;
-    bool mbBad;    
+    bool mbBad;
+
+    // Task P1: true once ReleaseBadPayload() has run for this KeyFrame (idempotency guard, and
+    // the flag paranoia-mode checks before allowing ComputeBoW()/GetFeaturesInArea() to proceed).
+    // NSDMI rather than a constructor init-list entry: both constructors have long,
+    // declaration-order-sensitive init lists, and this field's correct default (false) does not
+    // depend on any constructor argument, matching the pattern already used for
+    // MapPoint's P0.5 track-scratch NSDMIs.
+    bool mbPayloadReleased = false;
 
     float mHalfBaseline; // Only for visualization
 

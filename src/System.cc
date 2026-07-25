@@ -294,6 +294,10 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     {
         mptLocalMapping = new thread(&ORB_SLAM3::LocalMapping::Run,mpLocalMapper);
     }
+    // Allocator hygiene (Task P1): mallopt(M_ARENA_MAX, 2) "at startup", before KeyFrame/MapPoint
+    // payload allocation ramps up. A no-op unless ORB_MEM_RECLAIM_BAD=1 AND mbDeterministic (see
+    // MemoryGovernor::ReclaimBadPayloadEnabled()).
+    MemoryGovernor::ConfigureAllocatorIfEnabled();
     mpLocalMapper->mInitFr = initFr;
     if(settings_)
         mpLocalMapper->mThFarPoints = settings_->thFarPoints();
@@ -596,6 +600,13 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
     {
         mpLocalMapper->SpinOnceDeterministic();
         mpLoopCloser->SpinOnceDeterministic();
+        // Per-KF-tick reclaim (Task P1): drains the one-tick-deferred bad-KF/bad-MP payload
+        // release queues and runs malloc_trim(0) every 100 ticks, only when
+        // ORB_MEM_RECLAIM_BAD is active; a single static-bool check otherwise. Must run AFTER
+        // the two Spin calls (enqueues happen inside the LocalMapping spin) and after Track
+        // (the deferral exists precisely so the current frame can still read last tick's
+        // culled payloads) -- see MemoryGovernor.h.
+        MemoryGovernor::Instance().Tick();
         static const bool detDebug = getenv("ORB_DET_DEBUG") != nullptr;
         if (detDebug)
         {

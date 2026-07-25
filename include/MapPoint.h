@@ -133,7 +133,15 @@ public:
     void SetBadFlag();
     bool isBad();
 
-    void Replace(MapPoint* pMP);    
+    // Task P1 (memory reduction): releases mDescriptor of a bad MapPoint back to the allocator.
+    // NOT called from SetBadFlag() directly — a just-culled MapPoint's descriptor is still read
+    // by TrackWithMotionModel via the mLastFrame.mvpMapPoints pointer chain for one more frame
+    // (stock behaviour), so SetBadFlag() enqueues into MemoryGovernor and the governor calls
+    // this one KF-tick later (see MemoryGovernor.h). Idempotent; under ORB_MEM_PARANOIA any
+    // later GetDescriptor() aborts with the MapPoint id.
+    void ReleaseBadDescriptor();
+
+    void Replace(MapPoint* pMP);
     MapPoint* GetReplaced();
 
     void IncreaseVisible(int n=1);
@@ -243,6 +251,11 @@ protected:
 
      // Best descriptor to fast matching
      cv::Mat mDescriptor;
+
+     // Task P1: true once ReleaseBadDescriptor() has run (idempotency guard; under
+     // ORB_MEM_PARANOIA, GetDescriptor() aborts when this is set). NSDMI, matching the P0.5
+     // track-scratch initializer pattern above.
+     bool mbDescriptorReleased = false;
 
      // Reference KeyFrame
      KeyFrame* mpRefKF;
