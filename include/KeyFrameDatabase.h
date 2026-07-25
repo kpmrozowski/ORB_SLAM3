@@ -87,8 +87,13 @@ protected:
    // Associated vocabulary
    const ORBVocabulary* mpVoc;
 
-   // Inverted file
-   std::vector<list<KeyFrame*> > mvInvertedFile;
+   // Inverted file: bag-of-words word id -> keyframes whose BowVector contains that word.
+   // std::vector, not std::list (Task P2.5, compile-in): removes the ~48B/node list-node
+   // overhead across the several million postings a full flight accumulates, in exchange
+   // for O(n) erase (see KeyFrameDatabase::erase, which uses std::find + vector::erase to
+   // stay order-preserving, matching the previous list-walk iteration order exactly).
+   using PostingList = std::vector<KeyFrame*>;
+   std::vector<PostingList> mvInvertedFile;
 
    // For save relation without pointer, this is necessary for save/load function
    std::vector<list<long unsigned int> > mvBackupInvertedFileId;

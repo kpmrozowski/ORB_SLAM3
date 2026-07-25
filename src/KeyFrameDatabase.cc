@@ -22,6 +22,7 @@
 #include "KeyFrame.h"
 #include "Thirdparty/DBoW2/DBoW2/BowVector.h"
 
+#include <algorithm>
 #include<mutex>
 
 using namespace std;
@@ -51,16 +52,17 @@ void KeyFrameDatabase::erase(KeyFrame* pKF)
     // Erase elements in the Inverse File for the entry
     for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit!=vend; vit++)
     {
-        // List of keyframes that share the word
-        list<KeyFrame*> &lKFs =   mvInvertedFile[vit->first];
+        // Posting list of keyframes that share the word
+        PostingList &lKFs = mvInvertedFile[vit->first];
 
-        for(list<KeyFrame*>::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+        // std::find + vector::erase preserves the relative order of the remaining
+        // elements exactly like the list::erase walk-and-break this replaces: pKF
+        // appears at most once per word bucket (add() pushes it once per distinct
+        // BowVector word), so finding the first match and erasing it is equivalent.
+        const PostingList::iterator lit = std::find(lKFs.begin(), lKFs.end(), pKF);
+        if(lit != lKFs.end())
         {
-            if(pKF==*lit)
-            {
-                lKFs.erase(lit);
-                break;
-            }
+            lKFs.erase(lit);
         }
     }
 }
@@ -76,24 +78,33 @@ void KeyFrameDatabase::clearMap(Map* pMap)
     unique_lock<mutex> lock(mMutex);
 
     // Erase elements in the Inverse File for the entry
-    for(std::vector<list<KeyFrame*> >::iterator vit=mvInvertedFile.begin(), vend=mvInvertedFile.end(); vit!=vend; vit++)
+    for(std::size_t word_index = 0; word_index < mvInvertedFile.size(); ++word_index)
     {
-        // List of keyframes that share the word
-        list<KeyFrame*> &lKFs =  *vit;
+        // Posting list of keyframes that share the word
+        PostingList &lKFs = mvInvertedFile[word_index];
 
-        for(list<KeyFrame*>::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend;)
+        // Index loop, not an iterator walk-and-erase: std::vector::erase invalidates
+        // every iterator from the erased position onward, including an `end()` cached
+        // before the loop started (unlike std::list, where only the erased element's own
+        // iterator is invalidated). Compacting via read/write indices keeps the surviving
+        // elements in their original relative order (same skip-or-keep decision per
+        // element, encountered left-to-right, exactly like the list-based walk it
+        // replaces) while never dereferencing a stale iterator.
+        std::size_t write_index = 0;
+        for(std::size_t read_index = 0; read_index < lKFs.size(); ++read_index)
         {
-            KeyFrame* pKFi = *lit;
+            KeyFrame* const pKFi = lKFs[read_index];
             if(pMap == pKFi->GetMap())
             {
-                lit = lKFs.erase(lit);
                 // Dont delete the KF because the class Map clean all the KF when it is destroyed
             }
             else
             {
-                ++lit;
+                lKFs[write_index] = pKFi;
+                ++write_index;
             }
         }
+        lKFs.resize(write_index);
     }
 }
 
@@ -109,9 +120,9 @@ vector<KeyFrame*> KeyFrameDatabase::DetectLoopCandidates(KeyFrame* pKF, float mi
 
         for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
         {
-            list<KeyFrame*> &lKFs =   mvInvertedFile[vit->first];
+            PostingList &lKFs = mvInvertedFile[vit->first];
 
-            for(list<KeyFrame*>::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
             {
                 KeyFrame* pKFi=*lit;
                 if(pKFi->GetMap()==pKF->GetMap()) // For consider a loop candidate it a candidate it must be in the same map
@@ -237,9 +248,9 @@ void KeyFrameDatabase::DetectCandidates(KeyFrame* pKF, float minScore,vector<Key
 
         for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
         {
-            list<KeyFrame*> &lKFs = mvInvertedFile[vit->first];
+            PostingList &lKFs = mvInvertedFile[vit->first];
 
-            for(list<KeyFrame*>::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
             {
                 KeyFrame* pKFi=*lit;
                 if(pKFi->GetMap()==pKF->GetMap()) // For consider a loop candidate it a candidate it must be in the same map
@@ -453,9 +464,9 @@ void KeyFrameDatabase::DetectCandidates(KeyFrame* pKF, float minScore,vector<Key
 
     for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
     {
-        list<KeyFrame*> &lKFs = mvInvertedFile[vit->first];
+        PostingList &lKFs = mvInvertedFile[vit->first];
 
-        for(list<KeyFrame*>::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+        for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
         {
             KeyFrame* pKFi=*lit;
             pKFi->mnLoopQuery=-1;
@@ -478,9 +489,9 @@ void KeyFrameDatabase::DetectBestCandidates(KeyFrame *pKF, vector<KeyFrame*> &vp
 
         for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
         {
-            list<KeyFrame*> &lKFs =   mvInvertedFile[vit->first];
+            PostingList &lKFs = mvInvertedFile[vit->first];
 
-            for(list<KeyFrame*>::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
             {
                 KeyFrame* pKFi=*lit;
                 if(spConnectedKF.find(pKFi) != spConnectedKF.end())
@@ -614,9 +625,9 @@ void KeyFrameDatabase::DetectNBestCandidates(KeyFrame *pKF, vector<KeyFrame*> &v
 
         for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
         {
-            list<KeyFrame*> &lKFs =   mvInvertedFile[vit->first];
+            PostingList &lKFs = mvInvertedFile[vit->first];
 
-            for(list<KeyFrame*>::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
             {
                 KeyFrame* pKFi=*lit;
 
@@ -740,9 +751,9 @@ vector<KeyFrame*> KeyFrameDatabase::DetectRelocalizationCandidates(Frame *F, Map
 
         for(DBoW2::BowVector::const_iterator vit=F->mBowVec.begin(), vend=F->mBowVec.end(); vit != vend; vit++)
         {
-            list<KeyFrame*> &lKFs =   mvInvertedFile[vit->first];
+            PostingList &lKFs = mvInvertedFile[vit->first];
 
-            for(list<KeyFrame*>::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
             {
                 KeyFrame* pKFi=*lit;
                 if(pKFi->mnRelocQuery!=F->mnId)
