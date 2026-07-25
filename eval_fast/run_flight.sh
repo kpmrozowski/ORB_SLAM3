@@ -28,8 +28,8 @@ NF="${2:?usage: run_flight.sh <182_golem27|212_golem27> <nf> <out_dir> [times_fi
 OUT_DIR="${3:?usage: run_flight.sh <182_golem27|212_golem27> <nf> <out_dir> [times_file]}"
 
 case "$FLIGHT" in
-    182_golem27|212_golem27) ;;
-    *) echo "run_flight.sh: unsupported flight '$FLIGHT' (expected 182_golem27|212_golem27)" >&2; exit 1 ;;
+    *_*) ;;   # any <token>_<vehicle> flight key; dataset-dir existence (below) is the real guard
+    *) echo "run_flight.sh: '$FLIGHT' is not a flight key (expected <token>_<vehicle>)" >&2; exit 1 ;;
 esac
 if ! [[ "$NF" =~ ^[0-9]+$ ]]; then
     echo "run_flight.sh: nf must be a positive integer (got '$NF')" >&2
@@ -61,10 +61,10 @@ if [ ! -f "$BASE_CONFIG" ]; then
             echo "run_flight.sh: missing canonical $BASE_CONFIG (W0 baseline provenance copy - restore from git, cannot regenerate)" >&2
             exit 1
             ;;
-        182_golem27)
+        *)
             RESOLVED=$(python3 -c "
 import glob, json, os
-token = '182_golem27'
+token = '$FLIGHT'
 root = '$ROOT_EVAL'
 flights_json = os.path.join(root, 'eval_out', 'ic_tune', 'flights.json')
 chosen = None
@@ -113,7 +113,8 @@ export ORB_STATS_CSV="$OUT_DIR/frame_stats.csv"
 PREFIX="hl_${FLIGHT}"
 CLK_TCK=$(getconf CLK_TCK)
 INT=5
-CAP_S=4000
+CAP_S=${CAP_S:-4000}   # wall-clock kill cap (s); override for big flights whose per-frame
+                       # compute runs slower than real-time (e.g. 242_golem17 needs ~9000)
 
 # Run the binary directly (no `timeout` wrapper - see header note) so $! is its real PID.
 ( cd "$OUT_DIR" && exec "$BIN" "$VOCAB" "$RUN_CONFIG" "$DS_DIR" "$TIMES_FILE" "$PREFIX" > "$OUT_DIR/run.log" 2>&1 ) &

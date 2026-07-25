@@ -1,0 +1,54 @@
+%YAML:1.0
+# 155_golem27_2026-02-20T09-59-14 historical NORA flight - MONO-INERTIAL @ 800x600
+# intrinsics: calib 800x600 -> crop [0,0] -> x1.000 (stored-image geometry: native)
+File.version: "1.0"
+
+Camera.type: "KannalaBrandt8"
+
+Camera1.fx: 288.485047
+Camera1.fy: 287.537046
+Camera1.cx: 384.858502
+Camera1.cy: 312.867764
+
+Camera1.k1: 0.0289076504
+Camera1.k2: -0.0049712707
+Camera1.k3: 0.0046451777
+Camera1.k4: -0.0017374216
+
+Camera.width: 800
+Camera.height: 600
+Camera.fps: 3
+Camera.RGB: 1
+
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [ -0.0011813731796358, 0.9999354925174198, 0.0112966880702028, 0.0381229210326474,
+           -0.9999778957893968, -0.0011073569320478, -0.0065560424979571, -0.0873643876054232,
+           -0.0065431101183161, -0.0113041834986022, 0.9999146979344835, 0.1147305215389819,
+           0.0000000000000000, 0.0000000000000000, 0.0000000000000000, 1.0000000000000000]
+
+IMU.InsertKFsWhenLost: 1
+IMU.NoiseGyro: 5.0e-4
+IMU.NoiseAcc: 1.3e-2
+IMU.GyroWalk: 4.0e-6
+IMU.AccWalk: 9.0e-4
+IMU.Frequency: 399.51
+
+ORBextractor.nFeatures: 5000
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 15
+ORBextractor.minThFAST: 5
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0
