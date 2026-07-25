@@ -80,8 +80,8 @@ public:
 struct CvocHeader
 {
     char magic[8];
-    std::uint32_t k;
-    std::uint32_t l;
+    std::uint32_t branching_factor;  // wire field "k" in the .cvoc format comment above
+    std::uint32_t depth_levels;      // wire field "L" in the .cvoc format comment above
     std::uint32_t scoring_type;
     std::uint32_t weighting_type;
     std::uint32_t n_nodes;
@@ -220,8 +220,8 @@ std::vector<unsigned char> BuildPayload(const TextVocabularyIntrospector& intros
 
     header_out = CvocHeader{};
     std::memcpy(header_out.magic, kCvocMagic, sizeof(kCvocMagic));
-    header_out.k = static_cast<std::uint32_t>(introspector.m_k);
-    header_out.l = static_cast<std::uint32_t>(introspector.m_L);
+    header_out.branching_factor = static_cast<std::uint32_t>(introspector.m_k);
+    header_out.depth_levels = static_cast<std::uint32_t>(introspector.m_L);
     header_out.scoring_type = static_cast<std::uint32_t>(introspector.m_scoring);
     header_out.weighting_type = static_cast<std::uint32_t>(introspector.m_weighting);
     header_out.n_nodes = static_cast<std::uint32_t>(n_nodes);
@@ -348,8 +348,8 @@ bool CompactVocabulary::Load(const std::string& compact_vocabulary_path)
 
     mMappedBase = base;
     mMappedLength = file_length;
-    mBranchingFactor = header->k;
-    mDepthLevels = header->l;
+    mBranchingFactor = header->branching_factor;
+    mDepthLevels = header->depth_levels;
     mNumNodes = header->n_nodes;
     mNumWords = header->n_words;
 
