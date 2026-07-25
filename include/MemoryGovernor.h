@@ -13,25 +13,50 @@
  *                            (SetBadFlag() is reachable from LocalMapping/LoopClosing background
  *                            threads outside deterministic mode; ReclaimBadPayloadEnabled() must
  *                            therefore be safe to call from any thread — see .cc).
- *                            Release is DEFERRED BY ONE KF-TICK, not immediate: stock tracking
- *                            legitimately reads a just-culled object's payload during the very
- *                            next frame — TrackWithMotionModel matches against bad MapPoints'
- *                            descriptors carried in mLastFrame.mvpMapPoints (SearchLocalPoints
- *                            only scrubs them from the chain at that frame's TrackLocalMap),
- *                            and TrackReferenceKeyFrame/NeedNewKeyFrame can read a just-culled
- *                            mpReferenceKF's mFeatVec/mvpMapPoints before UpdateLocalKeyFrames
- *                            reassigns it. Immediate release at SetBadFlag() therefore crashes
- *                            (proven: SIGSEGV in ORBmatcher::DescriptorDistance via
- *                            mLastFrame.mvpMapPoints 15s into the fast gate) or silently
- *                            diverges the md5. SetBadFlag() instead enqueues via
- *                            DeferKeyFrameRelease()/DeferMapPointRelease(); Tick() — which runs
- *                            after the LocalMapping/LoopClosing spins of every tracked frame —
- *                            frees objects enqueued before the previous tick, i.e. only after
- *                            the one frame that may still read them stock-legitimately has
- *                            completed. By then every other reachability path is already severed
- *                            inside SetBadFlag() (Map/KFDB erasure, observation severance, chain
- *                            scrub, reference reassignment), verified per-reader in
- *                            task-P1-report.md.
+ *
+ *                            KeyFrame payload release is INLINE (Task P1-fix): KeyFrame::
+ *                            SetBadFlag() calls ReleaseBadPayload() on itself directly, at the
+ *                            very end of the function, before returning. The original design
+ *                            deferred it by one KF-tick via a DeferKeyFrameRelease() queue that
+ *                            Tick() drained, on the assumption that KeyFrames are never
+ *                            delete()d (so a queued pointer could never dangle) — that assumption
+ *                            is FALSE: LocalMapping::InitializeIMU() and ::ScaleRefinement() both
+ *                            run `(*lit)->SetBadFlag(); delete *lit;` back to back on entries of
+ *                            mlNewKeyFrames, reachable every frame from SpinOnceDeterministic().
+ *                            The deferred design therefore queued a pointer that could be freed
+ *                            before Tick() dereferenced it — a use-after-free (see
+ *                            task-P1-fix-report.md for the reproduction). Inline release closes
+ *                            the window: nothing can delete `this` between SetBadFlag() enqueuing
+ *                            it and the release actually running, because there is no longer any
+ *                            gap between the two. This is safe for the fields KeyFrame::
+ *                            ReleaseBadPayload() actually frees (mDescriptors/mBowVec/mFeatVec/
+ *                            mGrid/mvKeys/mvDepth): every reader of them is either isBad()-guarded
+ *                            or unreachable in monocular mode, verified by the required 4-cell
+ *                            determinism gate. mvKeysUn/mvuRight/mvpMapPoints are NOT released
+ *                            (KeyFrame::ReleaseBadPayload() keeps them, unchanged from Task P1)
+ *                            precisely because of the opposite problem — stale observations from
+ *                            other, live MapPoints make load-bearing unguarded reads into them —
+ *                            so inlining the release does not touch that hazard at all.
+ *
+ *                            MapPoint descriptor release REMAINS DEFERRED BY ONE KF-TICK: unlike
+ *                            KeyFrames, MapPoints that ever reach SetBadFlag() are never
+ *                            delete()d anywhere in this codebase (verified by grep — see
+ *                            task-P1-fix-report.md), so there is no dangling-pointer risk to fix
+ *                            for them. But stock tracking legitimately reads a just-culled
+ *                            MapPoint's descriptor during the very next frame —
+ *                            Tracking::TrackWithMotionModel matches against bad MapPoints'
+ *                            descriptors carried in mLastFrame.mvpMapPoints via
+ *                            ORBmatcher::SearchByProjection (SearchLocalPoints only scrubs them
+ *                            from the chain at that frame's TrackLocalMap) — so immediate release
+ *                            of the descriptor would race that legitimate read. This was proven
+ *                            empirically: immediate release produced a reproducible SIGSEGV in
+ *                            ORBmatcher::DescriptorDistance (null-data read of a released
+ *                            cv::Mat), independently re-derived by reading the exact call chain
+ *                            (task-P1-report.md, Finding 1 §5). MapPoint::SetBadFlag() therefore
+ *                            still enqueues via DeferMapPointRelease(); Tick() — which runs after
+ *                            the LocalMapping/LoopClosing spins of every tracked frame — releases
+ *                            MapPoints enqueued before the previous tick, i.e. only after the one
+ *                            frame that may still read them stock-legitimately has completed.
  * ORB_MEM_PARANOIA=1         (Task P1, validation-only) poison released KeyFrame payload fields
  *                            and abort-with-object-id on any read through KeyFrame::ComputeBoW()/
  *                            KeyFrame::GetFeaturesInArea()/MapPoint::GetDescriptor() after
@@ -73,7 +98,6 @@ namespace ORB_SLAM3
 {
 
 class Atlas;
-class KeyFrame;
 class MapPoint;
 
 class MemoryGovernor
@@ -96,23 +120,22 @@ public:
     void AppendStats(const double timestamp_seconds);
 
     // Per-KF-tick hook (Task P1): call once per tracked frame, after the deterministic
-    // LocalMapping/LoopClosing spin (System::TrackMonocular). Releases the payload of KeyFrames/
+    // LocalMapping/LoopClosing spin (System::TrackMonocular). Releases the descriptor of
     // MapPoints enqueued before the previous tick (see the ORB_MEM_RECLAIM_BAD deferral note in
     // the file header) and runs malloc_trim(0) every 100 calls — only when
-    // ReclaimBadPayloadEnabled(); otherwise a single static-bool check.
+    // ReclaimBadPayloadEnabled(); otherwise a single static-bool check. KeyFrame payload release
+    // is no longer part of Tick() (Task P1-fix): it now runs inline from KeyFrame::SetBadFlag().
     void Tick();
 
-    // Enqueue a KeyFrame whose SetBadFlag() just completed for payload release at the
+    // Enqueue a MapPoint whose SetBadFlag() just completed for descriptor release at the
     // next-plus-one Tick(). Only ever called (and only meaningful) when
-    // ReclaimBadPayloadEnabled(); deterministic single-thread only. KeyFrames are never deleted
-    // in this codebase (Map::clear() deliberately does not delete them), so queued pointers
-    // cannot dangle.
-    void DeferKeyFrameRelease(KeyFrame* const keyframe);
-
-    // Same as DeferKeyFrameRelease, for a MapPoint whose SetBadFlag() just completed; its
-    // descriptor is released at the next-plus-one Tick(). MapPoints registered in a Map are
-    // never deleted (the only `delete pMP` in the codebase is for stereo-only temporal points,
-    // which are never SetBadFlag()'d), so queued pointers cannot dangle.
+    // ReclaimBadPayloadEnabled(); deterministic single-thread only. MapPoints registered in a Map
+    // are never deleted (the only `delete pMP` in the codebase is for stereo-only temporal
+    // points, which are never SetBadFlag()'d), so queued pointers cannot dangle. (KeyFrames do
+    // not get this treatment as of Task P1-fix — see the file header — because that assumption
+    // does NOT hold for KeyFrames: LocalMapping::InitializeIMU()/::ScaleRefinement() do delete
+    // them right after SetBadFlag(), which is what made the deferred KeyFrame queue a
+    // use-after-free.)
     void DeferMapPointRelease(MapPoint* const map_point);
 
     // Current resident set size in KB, read from /proc/self/status VmRSS. 0 if unavailable.
@@ -153,13 +176,13 @@ private:
     Atlas* mpAtlas = nullptr;
     std::atomic<long> mKfShellReleased{0};
 
-    // Two-phase deferred-release queues (see the ORB_MEM_RECLAIM_BAD header note): objects
-    // enqueued at tick T sit in mPending*, move to mReady* at Tick(T), and are released at
-    // Tick(T+1) — strictly after the one frame that may still read them stock-legitimately.
-    // reserve()d once on first enqueue; clear() (capacity-retaining) + swap thereafter, so the
-    // steady-state per-tick path allocates nothing.
-    std::vector<KeyFrame*> mPendingKeyFrameRelease;
-    std::vector<KeyFrame*> mReadyKeyFrameRelease;
+    // Two-phase deferred-release queue for MapPoints (see the ORB_MEM_RECLAIM_BAD header note):
+    // MapPoints enqueued at tick T sit in mPendingMapPointRelease, move to
+    // mReadyMapPointRelease at Tick(T), and are released at Tick(T+1) — strictly after the one
+    // frame that may still read them stock-legitimately. reserve()d once on first enqueue;
+    // clear() (capacity-retaining) + swap thereafter, so the steady-state per-tick path allocates
+    // nothing. KeyFrames no longer go through a queue at all (Task P1-fix): their release is
+    // inline from KeyFrame::SetBadFlag().
     std::vector<MapPoint*> mPendingMapPointRelease;
     std::vector<MapPoint*> mReadyMapPointRelease;
 };

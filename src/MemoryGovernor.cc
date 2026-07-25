@@ -228,16 +228,11 @@ void MemoryGovernor::Tick()
     }
 
     // Two-phase deferred release (see MemoryGovernor.h): free everything enqueued BEFORE the
-    // previous tick (mReady*), then rotate this tick's enqueues (mPending*) into mReady* for
-    // the next tick. clear() retains vector capacity, so after the reserve() in the Defer*
-    // methods this path performs no heap allocation in steady state.
-    for (KeyFrame* const keyframe : mReadyKeyFrameRelease)
-    {
-        keyframe->ReleaseBadPayload();
-    }
-    mReadyKeyFrameRelease.clear();
-    mReadyKeyFrameRelease.swap(mPendingKeyFrameRelease);
-
+    // previous tick (mReadyMapPointRelease), then rotate this tick's enqueues
+    // (mPendingMapPointRelease) into mReadyMapPointRelease for the next tick. clear() retains
+    // vector capacity, so after the reserve() in DeferMapPointRelease() this path performs no
+    // heap allocation in steady state. KeyFrame release is no longer queued here (Task P1-fix):
+    // it runs inline from KeyFrame::SetBadFlag() instead — see MemoryGovernor.h.
     for (MapPoint* const map_point : mReadyMapPointRelease)
     {
         map_point->ReleaseBadDescriptor();
@@ -254,18 +249,6 @@ void MemoryGovernor::Tick()
         ::malloc_trim(0);
 #endif
     }
-}
-
-void MemoryGovernor::DeferKeyFrameRelease(KeyFrame* const keyframe)
-{
-    if (mPendingKeyFrameRelease.capacity() == 0)
-    {
-        // One-time warm-up (reclaim-enabled runs only). 4096 pointers = 32KB; per-tick cull
-        // counts are tens at most, so neither queue ever regrows after this.
-        mPendingKeyFrameRelease.reserve(4096);
-        mReadyKeyFrameRelease.reserve(4096);
-    }
-    mPendingKeyFrameRelease.push_back(keyframe);
 }
 
 void MemoryGovernor::DeferMapPointRelease(MapPoint* const map_point)

@@ -732,16 +732,25 @@ void KeyFrame::SetBadFlag()
     mpMap->EraseKeyFrame(this);
     mpKeyFrameDB->erase(this);
 
-    // Task P1 (memory reduction): by this point `this` is unlinked from the Map, the
-    // KeyFrameDatabase inverted index, the covisibility graph and every MapPoint's observation
-    // list (all above). The heavy payload is NOT freed here but enqueued for release at the
-    // next-plus-one MemoryGovernor::Tick(): the tracker may still read a just-culled
-    // mpReferenceKF's mFeatVec/mvpMapPoints during the very next frame
-    // (TrackReferenceKeyFrame/NeedNewKeyFrame) before UpdateLocalKeyFrames reassigns it -- see
-    // MemoryGovernor.h. Deterministic-mode + env-gated; a single static-bool check otherwise.
+    // Task P1-fix (memory reduction, UAF fix): by this point `this` is unlinked from the Map,
+    // the KeyFrameDatabase inverted index, the covisibility graph and every MapPoint's
+    // observation list (all above). Release the heavy payload INLINE, right here, rather than
+    // enqueueing it for a later MemoryGovernor::Tick(): the original deferred design assumed
+    // KeyFrames are never delete()d, which is false -- LocalMapping::InitializeIMU() and
+    // ::ScaleRefinement() both run `(*lit)->SetBadFlag(); delete *lit;` back to back on entries
+    // of mlNewKeyFrames (src/LocalMapping.cc), reachable every frame from
+    // SpinOnceDeterministic(). A queued `this` could therefore be freed before the deferred
+    // Tick() dereferenced it -- a use-after-free. Calling ReleaseBadPayload() here, before
+    // SetBadFlag() returns, closes that window: nothing can delete `this` out from under a
+    // pending release. Safe with respect to the fields released here (mDescriptors/mBowVec/
+    // mFeatVec/mGrid/mvKeys/mvDepth): every reader of them is either isBad()-guarded or
+    // unreachable in monocular mode, verified by the required 4-cell determinism gate -- see
+    // task-P1-fix-report.md. mvKeysUn/mvuRight/mvpMapPoints remain KEPT (not released), unchanged
+    // from Task P1 -- see ReleaseBadPayload(). Deterministic-mode + env-gated; a single
+    // static-bool check otherwise.
     if (MemoryGovernor::ReclaimBadPayloadEnabled())
     {
-        MemoryGovernor::Instance().DeferKeyFrameRelease(this);
+        ReleaseBadPayload();
     }
 }
 

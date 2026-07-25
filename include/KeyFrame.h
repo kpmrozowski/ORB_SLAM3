@@ -275,9 +275,11 @@ public:
 
     // Task P1 (memory reduction): releases part of the heavy per-KF payload (mvKeys, mvDepth,
     // mGrid, mBowVec, mFeatVec, mDescriptors) back to the allocator via the swap-with-empty
-    // idiom. NOT called from SetBadFlag() directly — the tracker may still read a just-culled
-    // reference KF's payload for one more frame (stock behaviour), so SetBadFlag() enqueues
-    // into MemoryGovernor and the governor calls this one KF-tick later (see MemoryGovernor.h).
+    // idiom. Task P1-fix: called INLINE from the very end of SetBadFlag() (after the map/KFDB
+    // erase), not deferred — the original one-KF-tick-deferred design assumed KeyFrames are
+    // never delete()d, which LocalMapping::InitializeIMU()/::ScaleRefinement() disprove (see
+    // MemoryGovernor.h and task-P1-fix-report.md). Idempotent regardless of call timing (guarded
+    // by mbPayloadReleased), so also safe to call directly should a future caller need to.
     // KEEPS mvKeysUn/mvuRight/mvpMapPoints: stock's observation graph carries stale
     // observations (neighbour-slot overwrite in CreateNewMapPoints without erasing the
     // overwritten MapPoint's observation), through which live MapPoints make load-bearing
