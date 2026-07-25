@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <thread>
 #include <pangolin/pangolin.h>
 #include <iomanip>
@@ -99,6 +100,37 @@ std::uint64_t DetHashBytes(const void* const data, const std::size_t num_bytes,
 }
 
 constexpr std::uint64_t kDetHashSeed = 1469598103934665603ULL;
+
+/** Task P2: dispatches ORB vocabulary loading on ORB_VOC_COMPACT. Unset (default): byte-for-byte
+ *  the original stock loadFromTextFile() call. Set: mmaps a <text_vocabulary_path>.cvoc sidecar
+ *  (see CompactVocabulary.h for the on-disk layout, ORBVocabulary::LoadCompact() for the
+ *  dispatch) instead of parsing the ~401MB text file, building the sidecar next to the text file
+ *  the first time it is needed (one log line - every subsequent run sharing that vocabulary path
+ *  mmaps it directly, including later runs of a different binary). The sidecar is proven
+ *  bit-exact for transform()/score() by Examples/Vocabulary/vocabulary_converter.cc --verify,
+ *  not by anything in this function. */
+bool LoadOrbVocabulary(ORBVocabulary* const vocabulary, const string& text_vocabulary_path)
+{
+    if (std::getenv("ORB_VOC_COMPACT") == nullptr)
+    {
+        return vocabulary->loadFromTextFile(text_vocabulary_path);
+    }
+    const string compact_vocabulary_path = text_vocabulary_path + ".cvoc";
+    std::ifstream probe(compact_vocabulary_path, std::ios::binary);
+    const bool compact_file_exists = probe.good();
+    probe.close();
+    if (!compact_file_exists)
+    {
+        cout << "ORB_VOC_COMPACT: " << compact_vocabulary_path << " not found, building it once from "
+             << text_vocabulary_path << " ..." << endl;
+        if (!CompactVocabulary::ConvertTextToCompact(text_vocabulary_path, compact_vocabulary_path))
+        {
+            cerr << "ORB_VOC_COMPACT: failed to build " << compact_vocabulary_path << endl;
+            return false;
+        }
+    }
+    return vocabulary->LoadCompact(compact_vocabulary_path);
+}
 }  // namespace
 
 Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
@@ -186,7 +218,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
 
         mpVocabulary = new ORBVocabulary();
-        bool bVocLoad = mpVocabulary->loadFromTextFile(strVocFile);
+        bool bVocLoad = LoadOrbVocabulary(mpVocabulary, strVocFile);
         if(!bVocLoad)
         {
             cerr << "Wrong path to vocabulary. " << endl;
@@ -208,7 +240,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
 
         mpVocabulary = new ORBVocabulary();
-        bool bVocLoad = mpVocabulary->loadFromTextFile(strVocFile);
+        bool bVocLoad = LoadOrbVocabulary(mpVocabulary, strVocFile);
         if(!bVocLoad)
         {
             cerr << "Wrong path to vocabulary. " << endl;

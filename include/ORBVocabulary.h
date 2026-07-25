@@ -20,14 +20,84 @@
 #ifndef ORBVOCABULARY_H
 #define ORBVOCABULARY_H
 
+#include <memory>
+#include <string>
+#include <vector>
+
 #include"Thirdparty/DBoW2/DBoW2/FORB.h"
 #include"Thirdparty/DBoW2/DBoW2/TemplatedVocabulary.h"
+
+#include "CompactVocabulary.h"
 
 namespace ORB_SLAM3
 {
 
-typedef DBoW2::TemplatedVocabulary<DBoW2::FORB::TDescriptor, DBoW2::FORB>
-  ORBVocabulary;
+// The stock DBoW2 template, kept under its own name (rather than only as an anonymous base of
+// ORBVocabulary below) so the converter/introspector and --verify tooling can still name the
+// concrete DBoW2 type directly.
+typedef DBoW2::TemplatedVocabulary<DBoW2::FORB::TDescriptor, DBoW2::FORB> DBoW2Vocabulary;
+
+// Thin dispatch wrapper (Task P2). Before this task ORBVocabulary was a typedef for
+// DBoW2Vocabulary; it is now a concrete class holding EITHER a DBoW2Vocabulary (stock text path)
+// OR a mmap'd CompactVocabulary (ORB_VOC_COMPACT=1 path), selected at load time by which of
+// loadFromTextFile()/LoadCompact() is called. Every existing call site (System/Tracking/
+// LoopClosing/KeyFrameDatabase/Frame/KeyFrame) keeps using `ORBVocabulary*`/`ORBVocabulary&`
+// exactly as before - only the four methods ORB-SLAM3 actually calls on a vocabulary object
+// (grep-verified across the src/ directory: loadFromTextFile, transform, score, size) are
+// forwarded here.
+// Everything else DBoW2::TemplatedVocabulary offers (vocabulary *creation*, cv::FileStorage
+// save/load, stopWords, ...) is unused by ORB-SLAM3 and intentionally not exposed.
+class ORBVocabulary
+{
+public:
+    ORBVocabulary() = default;
+
+    // Stock path (ORB_VOC_COMPACT unset): parses ORBvoc.txt exactly as before this task.
+    bool loadFromTextFile(const std::string& text_vocabulary_path)
+    {
+        mCompactMode = false;
+        return mTextVocabulary.loadFromTextFile(text_vocabulary_path);
+    }
+
+    // Compact path (ORB_VOC_COMPACT=1): mmaps an already-built .cvoc file. System.cc owns the
+    // "build it if missing" decision and the one-time log line (see LoadOrbVocabulary()); this
+    // method only ever mmaps a path that is expected to already exist.
+    bool LoadCompact(const std::string& compact_vocabulary_path)
+    {
+        mCompactMode = true;
+        mpCompactVocabulary = std::make_unique<CompactVocabulary>();
+        return mpCompactVocabulary->Load(compact_vocabulary_path);
+    }
+
+    void transform(const std::vector<DBoW2::FORB::TDescriptor>& features, DBoW2::BowVector& bow_vector,
+                   DBoW2::FeatureVector& feature_vector, const int levelsup) const
+    {
+        if (mCompactMode)
+        {
+            mpCompactVocabulary->Transform(features, bow_vector, feature_vector, levelsup);
+        }
+        else
+        {
+            mTextVocabulary.transform(features, bow_vector, feature_vector, levelsup);
+        }
+    }
+
+    double score(const DBoW2::BowVector& bow_vector_a, const DBoW2::BowVector& bow_vector_b) const
+    {
+        return mCompactMode ? mpCompactVocabulary->Score(bow_vector_a, bow_vector_b)
+                             : mTextVocabulary.score(bow_vector_a, bow_vector_b);
+    }
+
+    unsigned int size() const
+    {
+        return mCompactMode ? mpCompactVocabulary->Size() : mTextVocabulary.size();
+    }
+
+private:
+    bool mCompactMode = false;
+    DBoW2Vocabulary mTextVocabulary;
+    std::unique_ptr<CompactVocabulary> mpCompactVocabulary;
+};
 
 } //namespace ORB_SLAM
 
