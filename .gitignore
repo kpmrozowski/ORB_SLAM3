@@ -65,6 +65,9 @@ Thirdparty/g2o/build/
 Thirdparty/g2o/config.h
 Thirdparty/g2o/lib/
 Vocabulary/ORBvoc.txt
+# Task P2: compact mmap vocabulary sidecar - generated from ORBvoc.txt by vocabulary_converter
+# (or auto-built once by System.cc when ORB_VOC_COMPACT=1); regeneratable, not source.
+Vocabulary/*.cvoc
 build/
 
 lib/

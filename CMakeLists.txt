@@ -93,6 +93,7 @@ src/ICAlign.cc
 src/ICSeed.cc
 src/GpsOverlay.cc
 src/MemoryGovernor.cc
+src/CompactVocabulary.cc
 include/System.h
 include/Tracking.h
 include/LocalMapping.h
@@ -126,7 +127,8 @@ include/Settings.h
 include/ICAlign.h
 include/ICSeed.h
 include/GpsOverlay.h
-include/MemoryGovernor.h)
+include/MemoryGovernor.h
+include/CompactVocabulary.h)
 
 add_subdirectory(Thirdparty/g2o)
 
@@ -282,6 +284,13 @@ if(realsense2_FOUND)
             Examples/Calibration/recorder_realsense_T265.cc)
     target_link_libraries(recorder_realsense_T265 ${PROJECT_NAME})
 endif()
+
+# Vocabulary tools (Task P2): text ORBvoc.txt <-> compact mmap .cvoc converter/verifier.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Vocabulary)
+
+add_executable(vocabulary_converter
+        Examples/Vocabulary/vocabulary_converter.cc)
+target_link_libraries(vocabulary_converter ${PROJECT_NAME})
 
 #Old examples
 
