@@ -746,19 +746,19 @@ void LocalMapping::CreateNewMapPoints()
             const int &idx1 = vMatchedIndices[ikp].first;
             const int &idx2 = vMatchedIndices[ikp].second;
 
-            const cv::KeyPoint &kp1 = (mpCurrentKeyFrame -> NLeft == -1) ? mpCurrentKeyFrame->mvKeysUn[idx1]
+            const cv::KeyPoint &kp1 = (mpCurrentKeyFrame -> NLeft == -1) ? mpCurrentKeyFrame->GetKeysUn()[idx1]
                                                                          : (idx1 < mpCurrentKeyFrame -> NLeft) ? mpCurrentKeyFrame -> mvKeys[idx1]
                                                                                                                : mpCurrentKeyFrame -> mvKeysRight[idx1 - mpCurrentKeyFrame -> NLeft];
-            const float kp1_ur=mpCurrentKeyFrame->mvuRight[idx1];
+            const float kp1_ur=mpCurrentKeyFrame->GetKpURight(idx1);
             bool bStereo1 = (!mpCurrentKeyFrame->mpCamera2 && kp1_ur>=0);
             const bool bRight1 = (mpCurrentKeyFrame -> NLeft == -1 || idx1 < mpCurrentKeyFrame -> NLeft) ? false
                                                                                                          : true;
 
-            const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->mvKeysUn[idx2]
+            const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->GetKeysUn()[idx2]
                                                             : (idx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[idx2]
                                                                                      : pKF2 -> mvKeysRight[idx2 - pKF2 -> NLeft];
 
-            const float kp2_ur = pKF2->mvuRight[idx2];
+            const float kp2_ur = pKF2->GetKpURight(idx2);
             bool bStereo2 = (!pKF2->mpCamera2 && kp2_ur>=0);
             const bool bRight2 = (pKF2 -> NLeft == -1 || idx2 < pKF2 -> NLeft) ? false
                                                                                : true;
@@ -828,9 +828,9 @@ void LocalMapping::CreateNewMapPoints()
             float cosParallaxStereo2 = cosParallaxStereo;
 
             if(bStereo1)
-                cosParallaxStereo1 = cos(2*atan2(mpCurrentKeyFrame->mb/2,mpCurrentKeyFrame->mvDepth[idx1]));
+                cosParallaxStereo1 = cos(2*atan2(mpCurrentKeyFrame->mb/2,mpCurrentKeyFrame->GetKpDepth(idx1)));
             else if(bStereo2)
-                cosParallaxStereo2 = cos(2*atan2(pKF2->mb/2,pKF2->mvDepth[idx2]));
+                cosParallaxStereo2 = cos(2*atan2(pKF2->mb/2,pKF2->GetKpDepth(idx2)));
 
             if (bStereo1 || bStereo2) totalStereoPts++;
             
@@ -1231,14 +1231,14 @@ void LocalMapping::KeyFrameCulling()
                 {
                     if(!mbMonocular)
                     {
-                        if(pKF->mvDepth[i]>pKF->mThDepth || pKF->mvDepth[i]<0)
+                        if(pKF->GetKpDepth(i)>pKF->mThDepth || pKF->GetKpDepth(i)<0)
                             continue;
                     }
 
                     nMPs++;
                     if(pMP->Observations()>thObs)
                     {
-                        const int &scaleLevel = (pKF -> NLeft == -1) ? pKF->mvKeysUn[i].octave
+                        const int &scaleLevel = (pKF -> NLeft == -1) ? pKF->GetKeysUn()[i].octave
                                                                      : (i < pKF -> NLeft) ? pKF -> mvKeys[i].octave
                                                                                           : pKF -> mvKeysRight[i].octave;
                         const map<KeyFrame*, tuple<int,int>, IdLess> observations = pMP->GetObservations();
@@ -1248,11 +1248,24 @@ void LocalMapping::KeyFrameCulling()
                             KeyFrame* pKFi = mit->first;
                             if(pKFi==pKF)
                                 continue;
+                            // Task P3a investigated adding `if(pKFi->isBad()) continue;` here (the
+                            // guard Task P1's ReleaseBadPayload() comment names as the reason
+                            // mvKeysUnData/mvuRight/mvpMapPoints stay unreleased -- pKFi comes from
+                            // pMP->GetObservations(), which can carry a STALE (badKF, idx) entry
+                            // left behind by AddMapPoint()'s slot-overwrite-without-erase). Empirically
+                            // this guard DOES change the OFF-mode (no-reclaim) trajectory on the
+                            // required fast-gate flight (isolated via systematic-debugging: disabling
+                            // just this guard was sufficient to restore the canonical f_/kf_ md5) --
+                            // i.e. stock ORB-SLAM3 relies on reading a stale bad KF's keypoint data
+                            // here, exactly the case the task brief said to leave unguarded and
+                            // report instead of shipping. NOT added; mvKeysUnData/mvuRight/
+                            // mvpMapPoints remain unreleased, unchanged from Task P1. See
+                            // task-P3a-report.md.
                             tuple<int,int> indexes = mit->second;
                             int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
                             int scaleLeveli = -1;
                             if(pKFi -> NLeft == -1)
-                                scaleLeveli = pKFi->mvKeysUn[leftIndex].octave;
+                                scaleLeveli = pKFi->GetKeysUn()[leftIndex].octave;
                             else {
                                 if (leftIndex != -1) {
                                     scaleLeveli = pKFi->mvKeys[leftIndex].octave;

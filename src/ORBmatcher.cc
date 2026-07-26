@@ -221,13 +221,25 @@ namespace ORB_SLAM3
             return 4.0;
     }
 
+    // Task P3a fix B (grace-window reader, found during P1-fix re-review): reached from
+    // Tracking::TrackReferenceKeyFrame() with pKF==mpReferenceKF, with no isBad() guard on pKF at
+    // this call site. Verified safe rather than guarded: mFeatVec/mDescriptors have been part of
+    // KeyFrame::ReleaseBadPayload()'s release set since Task P1 (1dc293c), unchanged by this
+    // task, and this exact read has therefore already been exercised -- with RECLAIM_BAD=1, i.e.
+    // with these fields actually released on every bad KeyFrame -- across P1's and P1-fix's full
+    // required gates (4 cells each) plus all 7 official flights, bit-identical every time. Had
+    // mpReferenceKF ever been bad-and-released at this call site, GetFeatVec() would return an
+    // empty FeatureVector and this function's while-loop below would never execute, changing
+    // nmatches and diverging the trajectory -- which never happened. This task's own required
+    // 4-config gate (task-P3a-report.md) re-confirms it once more, now routed through the
+    // accessors. No guard added: mpReferenceKF is empirically and by construction never bad here.
     int ORBmatcher::SearchByBoW(KeyFrame* pKF,Frame &F, vector<MapPoint*> &vpMapPointMatches)
     {
         const vector<MapPoint*> vpMapPointsKF = pKF->GetMapPointMatches();
 
         vpMapPointMatches = vector<MapPoint*>(F.N,static_cast<MapPoint*>(NULL));
 
-        const DBoW2::FeatureVector &vFeatVecKF = pKF->mFeatVec;
+        const DBoW2::FeatureVector &vFeatVecKF = pKF->GetFeatVec();
 
         int nmatches=0;
 
@@ -261,7 +273,7 @@ namespace ORB_SLAM3
                     if(pMP->isBad())
                         continue;
 
-                    const cv::Mat &dKF= pKF->mDescriptors.row(realIdxKF);
+                    const cv::Mat &dKF= pKF->GetDescriptorsMat().row(realIdxKF);
 
                     int bestDist1=256;
                     int bestIdxF =-1 ;
@@ -332,7 +344,7 @@ namespace ORB_SLAM3
                             vpMapPointMatches[bestIdxF]=pMP;
 
                             const cv::KeyPoint &kp =
-                                    (!pKF->mpCamera2) ? pKF->mvKeysUn[realIdxKF] :
+                                    (!pKF->mpCamera2) ? pKF->GetKeysUn()[realIdxKF] :
                                     (realIdxKF >= pKF -> NLeft) ? pKF -> mvKeysRight[realIdxKF - pKF -> NLeft]
                                                                 : pKF -> mvKeys[realIdxKF];
 
@@ -362,7 +374,7 @@ namespace ORB_SLAM3
                                 vpMapPointMatches[bestIdxFR]=pMP;
 
                                 const cv::KeyPoint &kp =
-                                        (!pKF->mpCamera2) ? pKF->mvKeysUn[realIdxKF] :
+                                        (!pKF->mpCamera2) ? pKF->GetKeysUn()[realIdxKF] :
                                         (realIdxKF >= pKF -> NLeft) ? pKF -> mvKeysRight[realIdxKF - pKF -> NLeft]
                                                                     : pKF -> mvKeys[realIdxKF];
 
@@ -505,12 +517,12 @@ namespace ORB_SLAM3
                 if(vpMatched[idx])
                     continue;
 
-                const int &kpLevel= pKF->mvKeysUn[idx].octave;
+                const int &kpLevel= pKF->GetKeysUn()[idx].octave;
 
                 if(kpLevel<nPredictedLevel-1 || kpLevel>nPredictedLevel)
                     continue;
 
-                const cv::Mat &dKF = pKF->mDescriptors.row(idx);
+                const cv::Mat &dKF = pKF->GetDescriptorsMat().row(idx);
 
                 const int dist = DescriptorDistance(dMP,dKF);
 
@@ -618,12 +630,12 @@ namespace ORB_SLAM3
                 if(vpMatched[idx])
                     continue;
 
-                const int &kpLevel= pKF->mvKeysUn[idx].octave;
+                const int &kpLevel= pKF->GetKeysUn()[idx].octave;
 
                 if(kpLevel<nPredictedLevel-1 || kpLevel>nPredictedLevel)
                     continue;
 
-                const cv::Mat &dKF = pKF->mDescriptors.row(idx);
+                const cv::Mat &dKF = pKF->GetDescriptorsMat().row(idx);
 
                 const int dist = DescriptorDistance(dMP,dKF);
 
@@ -765,15 +777,15 @@ namespace ORB_SLAM3
 
     int ORBmatcher::SearchByBoW(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &vpMatches12)
     {
-        const vector<cv::KeyPoint> &vKeysUn1 = pKF1->mvKeysUn;
-        const DBoW2::FeatureVector &vFeatVec1 = pKF1->mFeatVec;
+        const vector<cv::KeyPoint> &vKeysUn1 = pKF1->GetKeysUn();
+        const DBoW2::FeatureVector &vFeatVec1 = pKF1->GetFeatVec();
         const vector<MapPoint*> vpMapPoints1 = pKF1->GetMapPointMatches();
-        const cv::Mat &Descriptors1 = pKF1->mDescriptors;
+        const cv::Mat &Descriptors1 = pKF1->GetDescriptorsMat();
 
-        const vector<cv::KeyPoint> &vKeysUn2 = pKF2->mvKeysUn;
-        const DBoW2::FeatureVector &vFeatVec2 = pKF2->mFeatVec;
+        const vector<cv::KeyPoint> &vKeysUn2 = pKF2->GetKeysUn();
+        const DBoW2::FeatureVector &vFeatVec2 = pKF2->GetFeatVec();
         const vector<MapPoint*> vpMapPoints2 = pKF2->GetMapPointMatches();
-        const cv::Mat &Descriptors2 = pKF2->mDescriptors;
+        const cv::Mat &Descriptors2 = pKF2->GetDescriptorsMat();
 
         vpMatches12 = vector<MapPoint*>(vpMapPoints1.size(),static_cast<MapPoint*>(NULL));
         vector<bool> vbMatched2(vpMapPoints2.size(),false);
@@ -798,7 +810,7 @@ namespace ORB_SLAM3
                 for(size_t i1=0, iend1=f1it->second.size(); i1<iend1; i1++)
                 {
                     const size_t idx1 = f1it->second[i1];
-                    if(pKF1 -> NLeft != -1 && idx1 >= pKF1 -> mvKeysUn.size()){
+                    if(pKF1 -> NLeft != -1 && idx1 >= pKF1 -> GetKeysUn().size()){
                         continue;
                     }
 
@@ -818,7 +830,7 @@ namespace ORB_SLAM3
                     {
                         const size_t idx2 = f2it->second[i2];
 
-                        if(pKF2 -> NLeft != -1 && idx2 >= pKF2 -> mvKeysUn.size()){
+                        if(pKF2 -> NLeft != -1 && idx2 >= pKF2 -> GetKeysUn().size()){
                             continue;
                         }
 
@@ -908,8 +920,8 @@ namespace ORB_SLAM3
     int ORBmatcher::SearchForTriangulation(KeyFrame *pKF1, KeyFrame *pKF2,
                                            vector<pair<size_t, size_t> > &vMatchedPairs, const bool bOnlyStereo, const bool bCoarse)
     {
-        const DBoW2::FeatureVector &vFeatVec1 = pKF1->mFeatVec;
-        const DBoW2::FeatureVector &vFeatVec2 = pKF2->mFeatVec;
+        const DBoW2::FeatureVector &vFeatVec1 = pKF1->GetFeatVec();
+        const DBoW2::FeatureVector &vFeatVec2 = pKF2->GetFeatVec();
 
         //Compute epipole in second image
         Sophus::SE3f T1w = pKF1->GetPose();
@@ -977,20 +989,20 @@ namespace ORB_SLAM3
                         continue;
                     }
 
-                    const bool bStereo1 = (!pKF1->mpCamera2 && pKF1->mvuRight[idx1]>=0);
+                    const bool bStereo1 = (!pKF1->mpCamera2 && pKF1->GetKpURight(idx1)>=0);
 
                     if(bOnlyStereo)
                         if(!bStereo1)
                             continue;
 
-                    const cv::KeyPoint &kp1 = (pKF1 -> NLeft == -1) ? pKF1->mvKeysUn[idx1]
+                    const cv::KeyPoint &kp1 = (pKF1 -> NLeft == -1) ? pKF1->GetKeysUn()[idx1]
                                                                     : (idx1 < pKF1 -> NLeft) ? pKF1 -> mvKeys[idx1]
                                                                                              : pKF1 -> mvKeysRight[idx1 - pKF1 -> NLeft];
 
                     const bool bRight1 = (pKF1 -> NLeft == -1 || idx1 < pKF1 -> NLeft) ? false
                                                                                        : true;
 
-                    const cv::Mat &d1 = pKF1->mDescriptors.row(idx1);
+                    const cv::Mat &d1 = pKF1->GetDescriptorsMat().row(idx1);
 
                     int bestDist = TH_LOW;
                     int bestIdx2 = -1;
@@ -1005,20 +1017,20 @@ namespace ORB_SLAM3
                         if(vbMatched2[idx2] || pMP2)
                             continue;
 
-                        const bool bStereo2 = (!pKF2->mpCamera2 &&  pKF2->mvuRight[idx2]>=0);
+                        const bool bStereo2 = (!pKF2->mpCamera2 &&  pKF2->GetKpURight(idx2)>=0);
 
                         if(bOnlyStereo)
                             if(!bStereo2)
                                 continue;
 
-                        const cv::Mat &d2 = pKF2->mDescriptors.row(idx2);
+                        const cv::Mat &d2 = pKF2->GetDescriptorsMat().row(idx2);
 
                         const int dist = DescriptorDistance(d1,d2);
 
                         if(dist>TH_LOW || dist>bestDist)
                             continue;
 
-                        const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->mvKeysUn[idx2]
+                        const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->GetKeysUn()[idx2]
                                                                         : (idx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[idx2]
                                                                                                  : pKF2 -> mvKeysRight[idx2 - pKF2 -> NLeft];
                         const bool bRight2 = (pKF2 -> NLeft == -1 || idx2 < pKF2 -> NLeft) ? false
@@ -1079,7 +1091,7 @@ namespace ORB_SLAM3
 
                     if(bestIdx2>=0)
                     {
-                        const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->mvKeysUn[bestIdx2]
+                        const cv::KeyPoint &kp2 = (pKF2 -> NLeft == -1) ? pKF2->GetKeysUn()[bestIdx2]
                                                                         : (bestIdx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[bestIdx2]
                                                                                                      : pKF2 -> mvKeysRight[bestIdx2 - pKF2 -> NLeft];
                         vMatches12[idx1]=bestIdx2;
@@ -1261,7 +1273,7 @@ namespace ORB_SLAM3
             for(vector<size_t>::const_iterator vit=vIndices.begin(), vend=vIndices.end(); vit!=vend; vit++)
             {
                 size_t idx = *vit;
-                const cv::KeyPoint &kp = (pKF -> NLeft == -1) ? pKF->mvKeysUn[idx]
+                const cv::KeyPoint &kp = (pKF -> NLeft == -1) ? pKF->GetKeysUn()[idx]
                                                               : (!bRight) ? pKF -> mvKeys[idx]
                                                                           : pKF -> mvKeysRight[idx];
 
@@ -1270,12 +1282,12 @@ namespace ORB_SLAM3
                 if(kpLevel<nPredictedLevel-1 || kpLevel>nPredictedLevel)
                     continue;
 
-                if(pKF->mvuRight[idx]>=0)
+                if(pKF->GetKpURight(idx)>=0)
                 {
                     // Check reprojection error in stereo
                     const float &kpx = kp.pt.x;
                     const float &kpy = kp.pt.y;
-                    const float &kpr = pKF->mvuRight[idx];
+                    const float &kpr = pKF->GetKpURight(idx);
                     const float ex = uv(0)-kpx;
                     const float ey = uv(1)-kpy;
                     const float er = ur-kpr;
@@ -1298,7 +1310,7 @@ namespace ORB_SLAM3
 
                 if(bRight) idx += pKF->NLeft;
 
-                const cv::Mat &dKF = pKF->mDescriptors.row(idx);
+                const cv::Mat &dKF = pKF->GetDescriptorsMat().row(idx);
 
                 const int dist = DescriptorDistance(dMP,dKF);
 
@@ -1418,12 +1430,12 @@ namespace ORB_SLAM3
             for(vector<size_t>::const_iterator vit=vIndices.begin(); vit!=vIndices.end(); vit++)
             {
                 const size_t idx = *vit;
-                const int &kpLevel = pKF->mvKeysUn[idx].octave;
+                const int &kpLevel = pKF->GetKeysUn()[idx].octave;
 
                 if(kpLevel<nPredictedLevel-1 || kpLevel>nPredictedLevel)
                     continue;
 
-                const cv::Mat &dKF = pKF->mDescriptors.row(idx);
+                const cv::Mat &dKF = pKF->GetDescriptorsMat().row(idx);
 
                 int dist = DescriptorDistance(dMP,dKF);
 
@@ -1551,12 +1563,12 @@ namespace ORB_SLAM3
             {
                 const size_t idx = *vit;
 
-                const cv::KeyPoint &kp = pKF2->mvKeysUn[idx];
+                const cv::KeyPoint &kp = pKF2->GetKeysUn()[idx];
 
                 if(kp.octave<nPredictedLevel-1 || kp.octave>nPredictedLevel)
                     continue;
 
-                const cv::Mat &dKF = pKF2->mDescriptors.row(idx);
+                const cv::Mat &dKF = pKF2->GetDescriptorsMat().row(idx);
 
                 const int dist = DescriptorDistance(dMP,dKF);
 
@@ -1631,12 +1643,12 @@ namespace ORB_SLAM3
             {
                 const size_t idx = *vit;
 
-                const cv::KeyPoint &kp = pKF1->mvKeysUn[idx];
+                const cv::KeyPoint &kp = pKF1->GetKeysUn()[idx];
 
                 if(kp.octave<nPredictedLevel-1 || kp.octave>nPredictedLevel)
                     continue;
 
-                const cv::Mat &dKF = pKF1->mDescriptors.row(idx);
+                const cv::Mat &dKF = pKF1->GetDescriptorsMat().row(idx);
 
                 const int dist = DescriptorDistance(dMP,dKF);
 
@@ -1971,7 +1983,7 @@ namespace ORB_SLAM3
 
                         if(mbCheckOrientation)
                         {
-                            float rot = pKF->mvKeysUn[i].angle-CurrentFrame.mvKeysUn[bestIdx2].angle;
+                            float rot = pKF->GetKeysUn()[i].angle-CurrentFrame.mvKeysUn[bestIdx2].angle;
                             if(rot<0.0)
                                 rot+=360.0f;
                             int bin = round(rot*factor);

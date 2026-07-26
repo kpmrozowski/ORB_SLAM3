@@ -397,9 +397,9 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
 
             const int leftIndex = get<0>(mit->second);
 
-            if(leftIndex != -1 && pKF->mvuRight[get<0>(mit->second)]<0)
+            if(leftIndex != -1 && pKF->GetKpURight(get<0>(mit->second))<0)
             {
-                const cv::KeyPoint &kpUn = pKF->mvKeysUn[leftIndex];
+                const cv::KeyPoint &kpUn = pKF->GetKeysUn()[leftIndex];
 
                 Eigen::Matrix<double,2,1> obs;
                 obs << kpUn.pt.x, kpUn.pt.y;
@@ -427,12 +427,12 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
                 vpEdgeKFMono.push_back(pKF);
                 vpMapPointEdgeMono.push_back(pMP);
             }
-            else if(leftIndex != -1 && pKF->mvuRight[leftIndex] >= 0) //Stereo observation
+            else if(leftIndex != -1 && pKF->GetKpURight(leftIndex) >= 0) //Stereo observation
             {
-                const cv::KeyPoint &kpUn = pKF->mvKeysUn[leftIndex];
+                const cv::KeyPoint &kpUn = pKF->GetKeysUn()[leftIndex];
 
                 Eigen::Matrix<double,3,1> obs;
-                const float kp_ur = pKF->mvuRight[get<0>(mit->second)];
+                const float kp_ur = pKF->GetKpURight(get<0>(mit->second));
                 obs << kpUn.pt.x, kpUn.pt.y, kp_ur;
 
                 g2o::EdgeStereoSE3ProjectXYZ* e = new g2o::EdgeStereoSE3ProjectXYZ();
@@ -895,9 +895,9 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                 const int leftIndex = get<0>(mit->second);
                 cv::KeyPoint kpUn;
 
-                if(leftIndex != -1 && pKFi->mvuRight[get<0>(mit->second)]<0) // Monocular observation
+                if(leftIndex != -1 && pKFi->GetKpURight(get<0>(mit->second))<0) // Monocular observation
                 {
-                    kpUn = pKFi->mvKeysUn[leftIndex];
+                    kpUn = pKFi->GetKeysUn()[leftIndex];
                     Eigen::Matrix<double,2,1> obs;
                     obs << kpUn.pt.x, kpUn.pt.y;
 
@@ -921,10 +921,10 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
                     optimizer.addEdge(e);
                 }
-                else if(leftIndex != -1 && pKFi->mvuRight[leftIndex] >= 0) // stereo observation
+                else if(leftIndex != -1 && pKFi->GetKpURight(leftIndex) >= 0) // stereo observation
                 {
-                    kpUn = pKFi->mvKeysUn[leftIndex];
-                    const float kp_ur = pKFi->mvuRight[leftIndex];
+                    kpUn = pKFi->GetKeysUn()[leftIndex];
+                    const float kp_ur = pKFi->GetKpURight(leftIndex);
                     Eigen::Matrix<double,3,1> obs;
                     obs << kpUn.pt.x, kpUn.pt.y, kp_ur;
 
@@ -1580,9 +1580,9 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
                 const int leftIndex = get<0>(mit->second);
 
                 // Monocular observation
-                if(leftIndex != -1 && pKFi->mvuRight[get<0>(mit->second)]<0)
+                if(leftIndex != -1 && pKFi->GetKpURight(get<0>(mit->second))<0)
                 {
-                    const cv::KeyPoint &kpUn = pKFi->mvKeysUn[leftIndex];
+                    const cv::KeyPoint &kpUn = pKFi->GetKeysUn()[leftIndex];
                     Eigen::Matrix<double,2,1> obs;
                     obs << kpUn.pt.x, kpUn.pt.y;
 
@@ -1607,11 +1607,11 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
 
                     nEdges++;
                 }
-                else if(leftIndex != -1 && pKFi->mvuRight[get<0>(mit->second)]>=0)// Stereo observation
+                else if(leftIndex != -1 && pKFi->GetKpURight(get<0>(mit->second))>=0)// Stereo observation
                 {
-                    const cv::KeyPoint &kpUn = pKFi->mvKeysUn[leftIndex];
+                    const cv::KeyPoint &kpUn = pKFi->GetKeysUn()[leftIndex];
                     Eigen::Matrix<double,3,1> obs;
-                    const float kp_ur = pKFi->mvuRight[get<0>(mit->second)];
+                    const float kp_ur = pKFi->GetKpURight(get<0>(mit->second));
                     obs << kpUn.pt.x, kpUn.pt.y, kp_ur;
 
                     g2o::EdgeStereoSE3ProjectXYZ* e = new g2o::EdgeStereoSE3ProjectXYZ();
@@ -2520,7 +2520,7 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
 
         // Set edge x1 = S12*X2
         Eigen::Matrix<double,2,1> obs1;
-        const cv::KeyPoint &kpUn1 = pKF1->mvKeysUn[i];
+        const cv::KeyPoint &kpUn1 = pKF1->GetKeysUn()[i];
         obs1 << kpUn1.pt.x, kpUn1.pt.y;
 
         ORB_SLAM3::EdgeSim3ProjectXYZ* e12 = new ORB_SLAM3::EdgeSim3ProjectXYZ();
@@ -2542,7 +2542,7 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
         bool inKF2;
         if(i2 >= 0)
         {
-            kpUn2 = pKF2->mvKeysUn[i2];
+            kpUn2 = pKF2->GetKeysUn()[i2];
             obs2 << kpUn2.pt.x, kpUn2.pt.y;
             inKF2 = true;
 
@@ -3036,11 +3036,11 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
                 cv::KeyPoint kpUn;
 
                 // Monocular left observation
-                if(leftIndex != -1 && pKFi->mvuRight[leftIndex]<0)
+                if(leftIndex != -1 && pKFi->GetKpURight(leftIndex)<0)
                 {
                     mVisEdges[pKFi->mnId]++;
 
-                    kpUn = pKFi->mvKeysUn[leftIndex];
+                    kpUn = pKFi->GetKeysUn()[leftIndex];
                     Eigen::Matrix<double,2,1> obs;
                     obs << kpUn.pt.x, kpUn.pt.y;
 
@@ -3068,10 +3068,10 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
                 // Stereo-observation
                 else if(leftIndex != -1)// Stereo observation
                 {
-                    kpUn = pKFi->mvKeysUn[leftIndex];
+                    kpUn = pKFi->GetKeysUn()[leftIndex];
                     mVisEdges[pKFi->mnId]++;
 
-                    const float kp_ur = pKFi->mvuRight[leftIndex];
+                    const float kp_ur = pKFi->GetKpURight(leftIndex);
                     Eigen::Matrix<double,3,1> obs;
                     obs << kpUn.pt.x, kpUn.pt.y, kp_ur;
 
@@ -3972,9 +3972,9 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
 
             nEdges++;
 
-            const cv::KeyPoint &kpUn = pKF->mvKeysUn[get<0>(mit->second)];
+            const cv::KeyPoint &kpUn = pKF->GetKeysUn()[get<0>(mit->second)];
 
-            if(pKF->mvuRight[get<0>(mit->second)]<0) //Monocular
+            if(pKF->GetKpURight(get<0>(mit->second))<0) //Monocular
             {
                 mpObsMPs[pMPi]++;
                 Eigen::Matrix<double,2,1> obs;
@@ -4006,7 +4006,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
             {
                 mpObsMPs[pMPi]+=2;
                 Eigen::Matrix<double,3,1> obs;
-                const float kp_ur = pKF->mvuRight[get<0>(mit->second)];
+                const float kp_ur = pKF->GetKpURight(get<0>(mit->second));
                 obs << kpUn.pt.x, kpUn.pt.y, kp_ur;
 
                 g2o::EdgeStereoSE3ProjectXYZ* e = new g2o::EdgeStereoSE3ProjectXYZ();
@@ -4170,7 +4170,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
             if(pKF->isBad() || pKF->mnId>maxKFid || pKF->mnBALocalForKF != pMainKF->mnId || !pKF->GetMapPoint(get<0>(mit->second)))
                 continue;
 
-            if(pKF->mvuRight[get<0>(mit->second)]<0) //Monocular
+            if(pKF->GetKpURight(get<0>(mit->second))<0) //Monocular
             {
                 mpObsFinalKFs[pKF]++;
             }
@@ -4640,9 +4640,9 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
 
             if(!pKFi->isBad())
             {
-                const cv::KeyPoint &kpUn = pKFi->mvKeysUn[get<0>(mit->second)];
+                const cv::KeyPoint &kpUn = pKFi->GetKeysUn()[get<0>(mit->second)];
 
-                if(pKFi->mvuRight[get<0>(mit->second)]<0) // Monocular observation
+                if(pKFi->GetKpURight(get<0>(mit->second))<0) // Monocular observation
                 {
                     Eigen::Matrix<double,2,1> obs;
                     obs << kpUn.pt.x, kpUn.pt.y;
@@ -4664,7 +4664,7 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
                 }
                 else // stereo observation
                 {
-                    const float kp_ur = pKFi->mvuRight[get<0>(mit->second)];
+                    const float kp_ur = pKFi->GetKpURight(get<0>(mit->second));
                     Eigen::Matrix<double,3,1> obs;
                     obs << kpUn.pt.x, kpUn.pt.y, kp_ur;
 

@@ -165,7 +165,7 @@ void MapPoint::AddObservation(KeyFrame* pKF, int idx)
 
     mObservations[pKF]=indexes;
 
-    if(!pKF->mpCamera2 && pKF->mvuRight[idx]>=0)
+    if(!pKF->mpCamera2 && pKF->GetKpURight(idx)>=0)
         nObs+=2;
     else
         nObs++;
@@ -182,7 +182,7 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
             int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
 
             if(leftIndex != -1){
-                if(!pKF->mpCamera2 && pKF->mvuRight[leftIndex]>=0)
+                if(!pKF->mpCamera2 && pKF->GetKpURight(leftIndex)>=0)
                     nObs-=2;
                 else
                     nObs--;
@@ -386,10 +386,10 @@ void MapPoint::ComputeDistinctiveDescriptors()
             int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
 
             if(leftIndex != -1){
-                vDescriptors.push_back(pKF->mDescriptors.row(leftIndex));
+                vDescriptors.push_back(pKF->GetDescriptorsMat().row(leftIndex));
             }
             if(rightIndex != -1){
-                vDescriptors.push_back(pKF->mDescriptors.row(rightIndex));
+                vDescriptors.push_back(pKF->GetDescriptorsMat().row(rightIndex));
             }
         }
     }
@@ -515,7 +515,7 @@ void MapPoint::UpdateNormalAndDepth()
     int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
     int level;
     if(pRefKF -> NLeft == -1){
-        level = pRefKF->mvKeysUn[leftIndex].octave;
+        level = pRefKF->GetKeysUn()[leftIndex].octave;
     }
     else if(leftIndex != -1){
         level = pRefKF -> mvKeys[leftIndex].octave;

@@ -892,7 +892,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                 int index = get<0>(indexes);
                                 if(index >= 0)
                                 {
-                                    int coord_x = pKFi->mvKeysUn[index].pt.x;
+                                    int coord_x = pKFi->GetKeysUn()[index].pt.x;
                                     if(coord_x < min_x)
                                     {
                                         min_x = coord_x;
@@ -901,7 +901,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                     {
                                         max_x = coord_x;
                                     }
-                                    int coord_y = pKFi->mvKeysUn[index].pt.y;
+                                    int coord_y = pKFi->GetKeysUn()[index].pt.y;
                                     if(coord_y < min_y)
                                     {
                                         min_y = coord_y;

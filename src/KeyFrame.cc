@@ -67,7 +67,7 @@ KeyFrame::KeyFrame():
         mnTrackReferenceForFrame(0), mnFuseTargetForKF(0), mnBALocalForKF(0), mnBAFixedForKF(0), mnBALocalForMerge(0),
         mnLoopQuery(0), mnLoopWords(0), mnRelocQuery(0), mnRelocWords(0), mnMergeQuery(0), mnMergeWords(0), mnBAGlobalForKF(0),
         fx(0), fy(0), cx(0), cy(0), invfx(0), invfy(0), mnPlaceRecognitionQuery(0), mnPlaceRecognitionWords(0), mPlaceRecognitionScore(0),
-        mbf(0), mb(0), mThDepth(0), N(0), mvKeys(static_cast<vector<cv::KeyPoint> >(NULL)), mvKeysUn(static_cast<vector<cv::KeyPoint> >(NULL)),
+        mbf(0), mb(0), mThDepth(0), N(0), mvKeys(static_cast<vector<cv::KeyPoint> >(NULL)), mvKeysUnData(static_cast<vector<cv::KeyPoint> >(NULL)),
         mvuRight(static_cast<vector<float> >(NULL)), mvDepth(static_cast<vector<float> >(NULL)), mnScaleLevels(0), mfScaleFactor(0),
         mfLogScaleFactor(0), mvScaleFactors(0), mvLevelSigma2(0), mvInvLevelSigma2(0), mnMinX(0), mnMinY(0), mnMaxX(0),
         mnMaxY(0), mPrevKF(static_cast<KeyFrame*>(NULL)), mNextKF(static_cast<KeyFrame*>(NULL)), mbFirstConnection(true), mpParent(NULL), mbNotErase(false),
@@ -83,9 +83,9 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     mnTrackReferenceForFrame(0), mnFuseTargetForKF(0), mnBALocalForKF(0), mnBAFixedForKF(0), mnBALocalForMerge(0),
     mnLoopQuery(0), mnLoopWords(0), mnRelocQuery(0), mnRelocWords(0), mnBAGlobalForKF(0), mnPlaceRecognitionQuery(0), mnPlaceRecognitionWords(0), mPlaceRecognitionScore(0),
     fx(F.fx), fy(F.fy), cx(F.cx), cy(F.cy), invfx(F.invfx), invfy(F.invfy),
-    mbf(F.mbf), mb(F.mb), mThDepth(F.mThDepth), N(F.N), mvKeys(F.mvKeys), mvKeysUn(F.mvKeysUn),
-    mvuRight(F.mvuRight), mvDepth(F.mvDepth), mDescriptors(F.mDescriptors.clone()),
-    mBowVec(F.mBowVec), mFeatVec(F.mFeatVec), mnScaleLevels(F.mnScaleLevels), mfScaleFactor(F.mfScaleFactor),
+    mbf(F.mbf), mb(F.mb), mThDepth(F.mThDepth), N(F.N), mvKeys(F.mvKeys), mvKeysUnData(F.mvKeysUn),
+    mvuRight(F.mvuRight), mvDepth(F.mvDepth), mDescriptorsData(F.mDescriptors.clone()),
+    mBowVec(F.mBowVec), mFeatVecData(F.mFeatVec), mnScaleLevels(F.mnScaleLevels), mfScaleFactor(F.mfScaleFactor),
     mfLogScaleFactor(F.mfLogScaleFactor), mvScaleFactors(F.mvScaleFactors), mvLevelSigma2(F.mvLevelSigma2),
     mvInvLevelSigma2(F.mvInvLevelSigma2), mnMinX(F.mnMinX), mnMinY(F.mnMinY), mnMaxX(F.mnMaxX),
     mnMaxY(F.mnMaxY), mK_(F.mK_), mPrevKF(NULL), mNextKF(NULL), mpImuPreintegrated(F.mpImuPreintegrated),
@@ -136,12 +136,12 @@ void KeyFrame::ComputeBoW()
     {
         AbortOnReleasedPayloadRead(mnId, "ComputeBoW");
     }
-    if(mBowVec.empty() || mFeatVec.empty())
+    if(mBowVec.empty() || mFeatVecData.empty())
     {
-        vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(mDescriptors);
+        vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(mDescriptorsData);
         // Feature vector associate features with nodes in the 4th level (from leaves up)
         // We assume the vocabulary tree has 6 levels, change the 4 otherwise
-        mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVec,4);
+        mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVecData,4);
     }
 }
 
@@ -761,43 +761,86 @@ void KeyFrame::ReleaseBadPayload()
         return;
     }
 
-    // Partial release (Task P1). KEPT deliberately -- mvKeysUn, mvuRight, mvpMapPoints:
+    // Partial release (Task P1). KEPT deliberately -- mvKeysUnData, mvuRight, mvpMapPoints:
     // stock ORB-SLAM3 leaves STALE OBSERVATIONS behind (CreateNewMapPoints can overwrite a
     // neighbour-KF slot via AddMapPoint without erasing the overwritten MapPoint's observation
     // -- traced live: KF35 slot 87 held MP12960, overwritten by MP12962; MP12960 kept
     // (KF35,87) in mObservations for good). Such live MapPoints later make LOAD-BEARING
     // reads/writes into this bad KF's arrays: KeyFrameCulling's observer loop reads
-    // mvKeysUn[idx].octave with no isBad() guard (the value feeds the redundancy count),
+    // GetKeysUn()[idx].octave with no isBad() guard (the value feeds the redundancy count),
     // MapPoint::SetBadFlag/Replace write mvpMapPoints slots via EraseMapPointMatch/
     // ReplaceMapPointMatch, and MapPoint::EraseObservation reads mvuRight[idx] for its nObs
-    // accounting. Releasing those three arrays crashes (or silently changes the trajectory);
-    // full release of them arrives with P3a's guarded accessors. Everything below has NO
-    // stale-observation reader: remaining readers are isBad()-guarded
-    // (ComputeDistinctiveDescriptors, LocalBA/GBA edge builders, culling candidates) or
-    // live-/NotErase-scoped (matchers, KFDB after erase), verified per-site in
-    // task-P1-report.md.
+    // accounting.
+    //
+    // Task P3a investigated releasing these three (routing every reader through the accessors
+    // above is exactly what was needed to make the compiler enumerate them), and specifically
+    // tried adding the missing `if(pKFi->isBad()) continue;` guard at the KeyFrameCulling site.
+    // That guard was empirically PROVEN to change the OFF-mode (no-reclaim) trajectory on the
+    // required fast-gate flight (212_golem27, NF=2500): isolated via systematic-debugging by
+    // disabling just that one guard, which alone restored the canonical f_/kf_ md5. I.e. stock
+    // ORB-SLAM3 genuinely reaches this stale-observation path and depends on reading the bad
+    // KF's (still-present, unreleased) keypoint data on this flight -- exactly the case the task
+    // brief said to leave unguarded rather than ship. Per that brief's explicit fallback, the
+    // guard and the release of these three fields are NOT shipped; P3a ships only the accessor
+    // refactor (all external reads routed through GetKeysUn()/GetKpURight()/GetKpDepth()/
+    // GetMapPoint() etc.), unchanged in what it releases from Task P1. See task-P3a-report.md
+    // for the full investigation and the isolation-test evidence.
+    //
+    // Everything below (mvKeys/mvDepth/mGrid/mBowVec/mFeatVecData/mDescriptorsData) has NO
+    // stale-observation reader: remaining readers are isBad()-guarded (ComputeDistinctiveDescriptors,
+    // LocalBA/GBA edge builders, culling candidates) or live-/NotErase-scoped (matchers, KFDB
+    // after erase), verified per-site in task-P1-report.md.
     SwapWithEmpty(mvKeys);
     SwapWithEmpty(mvDepth);
     SwapWithEmpty(mGrid);
     SwapWithEmpty(mBowVec);
-    SwapWithEmpty(mFeatVec);
+    SwapWithEmpty(mFeatVecData);
 
     if (MemoryGovernor::ParanoiaEnabled())
     {
         // A released cv::Mat is 0x0 (rows==0), which several size-driven loops elsewhere treat as
         // "nothing to do" and silently skip -- unhelpful for validation. Use a recognizable
-        // non-empty sentinel instead, so any direct read of the still-public mDescriptors field
-        // that bypasses the ComputeBoW()/GetFeaturesInArea() guards above surfaces as an obviously
-        // wrong 1x1 matrix rather than a quietly-skipped empty one.
-        mDescriptors = cv::Mat(1, 1, CV_8UC1, cv::Scalar(0xAA));
+        // non-empty sentinel instead, so any direct read of mDescriptorsData (via
+        // GetDescriptorsMat()) that bypasses the ComputeBoW()/GetFeaturesInArea() guards above
+        // surfaces as an obviously wrong 1x1 matrix rather than a quietly-skipped empty one.
+        mDescriptorsData = cv::Mat(1, 1, CV_8UC1, cv::Scalar(0xAA));
     }
     else
     {
-        mDescriptors.release();
+        mDescriptorsData.release();
     }
 
     mbPayloadReleased = true;
     MemoryGovernor::IncrementKfShellReleased();
+}
+
+// Task P3a: fault-in choke points. Pure indirection over the still-present, privatized members --
+// zero behavior change versus the direct field reads these replace across ~65 external call
+// sites. Bounds-checking these against release (so P3c/P3d can later actually drop/page the
+// underlying vectors) is deliberately left to that later task, not added speculatively here.
+const std::vector<cv::KeyPoint>& KeyFrame::GetKeysUn()
+{
+    return mvKeysUnData;
+}
+
+const cv::Mat& KeyFrame::GetDescriptorsMat()
+{
+    return mDescriptorsData;
+}
+
+const DBoW2::FeatureVector& KeyFrame::GetFeatVec()
+{
+    return mFeatVecData;
+}
+
+float KeyFrame::GetKpURight(const int keypoint_index) const
+{
+    return mvuRight[keypoint_index];
+}
+
+float KeyFrame::GetKpDepth(const int keypoint_index) const
+{
+    return mvDepth[keypoint_index];
 }
 
 bool KeyFrame::isBad()
@@ -858,7 +901,7 @@ vector<size_t> KeyFrame::GetFeaturesInArea(const float &x, const float &y, const
             const vector<size_t> vCell = (!bRight) ? mGrid[ix][iy] : mGridRight[ix][iy];
             for(size_t j=0, jend=vCell.size(); j<jend; j++)
             {
-                const cv::KeyPoint &kpUn = (NLeft == -1) ? mvKeysUn[vCell[j]]
+                const cv::KeyPoint &kpUn = (NLeft == -1) ? mvKeysUnData[vCell[j]]
                                                          : (!bRight) ? mvKeys[vCell[j]]
                                                                      : mvKeysRight[vCell[j]];
                 const float distx = kpUn.pt.x-x;

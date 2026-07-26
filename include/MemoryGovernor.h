@@ -32,11 +32,17 @@
  *                            ReleaseBadPayload() actually frees (mDescriptors/mBowVec/mFeatVec/
  *                            mGrid/mvKeys/mvDepth): every reader of them is either isBad()-guarded
  *                            or unreachable in monocular mode, verified by the required 4-cell
- *                            determinism gate. mvKeysUn/mvuRight/mvpMapPoints are NOT released
+ *                            determinism gate. mvKeysUnData/mvuRight/mvpMapPoints are NOT released
  *                            (KeyFrame::ReleaseBadPayload() keeps them, unchanged from Task P1)
  *                            precisely because of the opposite problem — stale observations from
- *                            other, live MapPoints make load-bearing unguarded reads into them —
- *                            so inlining the release does not touch that hazard at all.
+ *                            other, live MapPoints make load-bearing unguarded reads into them.
+ *                            Task P3a's accessor refactor routes every external read of these
+ *                            three through fault-in choke points (KeyFrame::GetKeysUn()/
+ *                            GetKpURight()/GetMapPoint() etc.) and investigated actually releasing
+ *                            them (adding the missing isBad() guard the choke points made
+ *                            possible to add) — that guard was empirically proven, via this
+ *                            task's own required gate, to change the OFF-mode trajectory on the
+ *                            gate flight, so it was not shipped; see task-P3a-report.md.
  *
  *                            MapPoint descriptor release REMAINS DEFERRED BY ONE KF-TICK: unlike
  *                            KeyFrames, MapPoints that ever reach SetBadFlag() are never

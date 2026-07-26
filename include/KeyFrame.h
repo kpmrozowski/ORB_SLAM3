@@ -123,13 +123,13 @@ class KeyFrame
         ar & const_cast<int&>(N);
         // KeyPoints
         serializeVectorKeyPoints<Archive>(ar, mvKeys, version);
-        serializeVectorKeyPoints<Archive>(ar, mvKeysUn, version);
+        serializeVectorKeyPoints<Archive>(ar, mvKeysUnData, version);
         ar & const_cast<vector<float>& >(mvuRight);
         ar & const_cast<vector<float>& >(mvDepth);
-        serializeMatrix<Archive>(ar,mDescriptors,version);
+        serializeMatrix<Archive>(ar,mDescriptorsData,version);
         // BOW
         ar & mBowVec;
-        ar & mFeatVec;
+        ar & mFeatVecData;
         // Pose relative to parent
         serializeSophusSE3<Archive>(ar, mTcp, version);
         // Scale
@@ -273,23 +273,28 @@ public:
     void SetBadFlag();
     bool isBad();
 
-    // Task P1 (memory reduction): releases part of the heavy per-KF payload (mvKeys, mvDepth,
-    // mGrid, mBowVec, mFeatVec, mDescriptors) back to the allocator via the swap-with-empty
+    // Task P1 (memory reduction): releases the heavy per-KF payload (mvKeys, mvDepth, mGrid,
+    // mBowVec, mFeatVecData, mDescriptorsData) back to the allocator via the swap-with-empty
     // idiom. Task P1-fix: called INLINE from the very end of SetBadFlag() (after the map/KFDB
     // erase), not deferred — the original one-KF-tick-deferred design assumed KeyFrames are
     // never delete()d, which LocalMapping::InitializeIMU()/::ScaleRefinement() disprove (see
     // MemoryGovernor.h and task-P1-fix-report.md). Idempotent regardless of call timing (guarded
     // by mbPayloadReleased), so also safe to call directly should a future caller need to.
-    // KEEPS mvKeysUn/mvuRight/mvpMapPoints: stock's observation graph carries stale
+    // KEEPS mvKeysUnData/mvuRight/mvpMapPoints: stock's observation graph carries stale
     // observations (neighbour-slot overwrite in CreateNewMapPoints without erasing the
     // overwritten MapPoint's observation), through which live MapPoints make load-bearing
-    // reads/writes into bad KFs — full release of those three needs P3a's guarded accessors
-    // (see the comment inside ReleaseBadPayload()). Also KEEPS poses/mTcp/mpParent/
+    // reads/writes into bad KFs. Task P3a's accessor refactor routes every external read of
+    // these three through GetKeysUn()/GetKpURight()/GetMapPoint() etc., and investigated
+    // releasing them (adding the missing isBad() guard at LocalMapping::KeyFrameCulling's
+    // redundancy loop) — that guard was empirically proven to change the required fast gate's
+    // OFF-mode trajectory on this flight (see the comment inside ReleaseBadPayload() and
+    // task-P3a-report.md), so the release is NOT shipped; full release of these three remains a
+    // design question for a later task. Also KEEPS poses/mTcp/mpParent/
     // mspChildrens/flags/mpImuPreintegrated — trajectory saving and spanning-tree reparenting
     // read only those from bad KeyFrames. Idempotent (guarded by mbPayloadReleased). See
     // task-P1-report.md for the per-field reader audit and the const-removal note (mvKeys/
-    // mvKeysUn/mvuRight/mvDepth/mDescriptors were declared const; ReleaseBadPayload() is the
-    // sole sanctioned post-construction mutator).
+    // mvKeysUnData/mvuRight/mvDepth/mDescriptorsData were declared const; ReleaseBadPayload() is
+    // the sole sanctioned post-construction mutator).
     void ReleaseBadPayload();
 
     // Compute Scene Depth (q=2 median). Used in monocular.
@@ -399,19 +404,14 @@ public:
 
     // KeyPoints, stereo coordinate and descriptors (all associated by an index).
     // Task P1: NOT const (was const in upstream ORB-SLAM3) -- KeyFrame::ReleaseBadPayload()
-    // swaps these to empty once a KeyFrame goes bad, to actually free the payload. Nothing
-    // outside KeyFrame ever writes them (every other call site only reads), so this is safe;
+    // swaps this to empty once a KeyFrame goes bad, to actually free the payload. Nothing
+    // outside KeyFrame ever writes it (every other call site only reads), so this is safe;
     // read-only external access is unaffected since a non-const member binds fine to a const
     // reference/parameter everywhere it is currently read.
     std::vector<cv::KeyPoint> mvKeys;
-    std::vector<cv::KeyPoint> mvKeysUn;
-    std::vector<float> mvuRight; // negative value for monocular points
-    std::vector<float> mvDepth; // negative value for monocular points
-    cv::Mat mDescriptors;
 
     //BoW
     DBoW2::BowVector mBowVec;
-    DBoW2::FeatureVector mFeatVec;
 
     // Pose relative to parent (this is computed when bad flag is activated)
     Sophus::SE3f mTcp;
@@ -448,6 +448,36 @@ public:
 
     //bool mbHasHessian;
     //cv::Mat mHessianPose;
+
+    // Task P3a (memory reduction): privatized payload fields. External readers (~65 call sites
+    // across ORBmatcher.cc/Optimizer.cc/LocalMapping.cc/LoopClosing.cc/Sim3Solver.cc/MapPoint.cc)
+    // must go through the accessors below instead of touching these directly -- a single fault-in
+    // choke point per field, so a later task (P3d) can page cold KFs' payload in/out without
+    // touching every reader again. Still single-thread-access (no mutex), same rationale as the
+    // rest of the "no mutex needed" block above; only relocated + (for the first three) renamed.
+    // ReleaseBadPayload() -- the sole sanctioned post-construction mutator -- and the rest of
+    // KeyFrame.cc access these directly (private members are visible to all of the class's own
+    // member functions, not just accessors).
+private:
+    std::vector<cv::KeyPoint> mvKeysUnData;
+    cv::Mat mDescriptorsData;
+    DBoW2::FeatureVector mFeatVecData;
+    std::vector<float> mvuRight; // negative value for monocular points
+    std::vector<float> mvDepth; // negative value for monocular points
+
+public:
+    // Fault-in choke points (Task P3a). For now these simply return the still-present member --
+    // a pure indirection with zero behavior change (mvuRight/mvDepth are never dropped in P3a;
+    // that is P3c's job). GetKpURight()/GetKpDepth() return -1 for monocular points, matching the
+    // sign convention already used throughout the codebase. Bounds-checking these choke points
+    // against a possibly-released container is deliberately left to whichever later task
+    // actually starts releasing/paging mvuRight/mvDepth (see ReleaseBadPayload()'s comment: Task
+    // P3a investigated and rejected releasing them for now).
+    const std::vector<cv::KeyPoint>& GetKeysUn();
+    const cv::Mat& GetDescriptorsMat();
+    const DBoW2::FeatureVector& GetFeatVec();
+    float GetKpURight(const int keypoint_index) const;
+    float GetKpDepth(const int keypoint_index) const;
 
     // The following variables need to be accessed trough a mutex to be thread safe.
 protected:
