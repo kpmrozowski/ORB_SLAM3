@@ -130,18 +130,64 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     mnOriginMapId = pMap->GetId();
 }
 
+// Task P3b: ORB_MEM_FLATBOW knob, read once (env is fixed for the process lifetime). Unset or 0 =>
+// stock std::map BoW path, byte-for-byte; 1 => build the flat vector and free the map in ComputeBoW.
+bool KeyFrame::IsFlatBowEnabled()
+{
+    static const char* const value = getenv("ORB_MEM_FLATBOW");
+    static const bool enabled = value != nullptr && atoi(value) != 0;
+    return enabled;
+}
+
 void KeyFrame::ComputeBoW()
 {
     if (MemoryGovernor::ParanoiaEnabled() && mbPayloadReleased)
     {
         AbortOnReleasedPayloadRead(mnId, "ComputeBoW");
     }
+
+    // Task P3b: once the flat BoW is built the std::map mBowVec is freed, so the stock
+    // empty()-guarded recompute below must not re-fire on a later ComputeBoW() call (the two
+    // initialization KeyFrames are computed once in Tracking and again in LocalMapping). A non-empty
+    // flat vector is the "already built" signal; KeyFrames always carry >0 words in practice.
+    const bool flat_bow_enabled = IsFlatBowEnabled();
+    if (flat_bow_enabled && !mBowVecFlat.empty())
+    {
+        return;
+    }
+
     if(mBowVec.empty() || mFeatVecData.empty())
     {
         vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(mDescriptorsData);
         // Feature vector associate features with nodes in the 4th level (from leaves up)
         // We assume the vocabulary tree has 6 levels, change the 4 otherwise
         mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVecData,4);
+    }
+
+    if (flat_bow_enabled)
+    {
+        // Only the L1_NORM/TF_IDF combination is replicated bit-for-bit by FlatL1Score; abort loudly
+        // rather than silently diverge if a different vocabulary is ever configured.
+        if (!mpORBvocabulary->UsesL1TfIdfScoring())
+        {
+            std::fprintf(stderr,
+                         "ORB_MEM_FLATBOW=1 requires an L1_NORM/TF_IDF vocabulary; aborting.\n");
+            std::abort();
+        }
+
+        // Copy the transform() doubles verbatim; std::map iterates ascending by WordId, so the flat
+        // vector comes out sorted -- exactly what FlatL1Score's merge-walk requires for bit-identity.
+        mBowVecFlat.clear();
+        mBowVecFlat.reserve(mBowVec.size());
+        for (DBoW2::BowVector::const_iterator word_it = mBowVec.begin(), word_end = mBowVec.end();
+             word_it != word_end; ++word_it)
+        {
+            mBowVecFlat.emplace_back(word_it->first, word_it->second);
+        }
+
+        // std::map::clear() leaves the red-black-tree nodes allocated; swapping with an empty map
+        // returns them to the allocator so RSS actually drops (same idiom as SwapWithEmpty above).
+        DBoW2::BowVector().swap(mBowVec);
     }
 }
 
@@ -794,6 +840,11 @@ void KeyFrame::ReleaseBadPayload()
     SwapWithEmpty(mvDepth);
     SwapWithEmpty(mGrid);
     SwapWithEmpty(mBowVec);
+    // Task P3b: under ORB_MEM_FLATBOW the map above is already empty (freed in ComputeBoW) and this
+    // flat vector is the resident BoW; free it too so a bad KeyFrame drops its whole BoW footprint.
+    // KeyFrameDatabase::erase() runs before this (SetBadFlag erases from the DB, then releases), so
+    // the inverted-file cleanup has already read the flat words it needs.
+    SwapWithEmpty(mBowVecFlat);
     SwapWithEmpty(mFeatVecData);
 
     if (MemoryGovernor::ParanoiaEnabled())

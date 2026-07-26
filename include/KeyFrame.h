@@ -21,6 +21,7 @@
 #define KEYFRAME_H
 
 #include "DeterministicOrder.h"
+#include "FlatBowVector.h"
 #include "MapPoint.h"
 #include "Thirdparty/DBoW2/DBoW2/BowVector.h"
 #include "Thirdparty/DBoW2/DBoW2/FeatureVector.h"
@@ -218,6 +219,13 @@ public:
     // Bag of Words Representation
     void ComputeBoW();
 
+    // Task P3b (memory reduction). IsFlatBowEnabled(): reads ORB_MEM_FLATBOW once (default OFF);
+    // when ON, ComputeBoW() builds mBowVecFlat from the transform() doubles and frees the std::map
+    // mBowVec, and KeyFrameDatabase scores/indexes off GetBowFlat() instead of mBowVec. GetBowFlat()
+    // returns the resident flat vector; it is empty (and must not be consulted) when the knob is OFF.
+    static bool IsFlatBowEnabled();
+    const FlatBowVector& GetBowFlat() const { return mBowVecFlat; }
+
     // Covisibility graph functions
     void AddConnection(KeyFrame* pKF, const int &weight);
     void EraseConnection(KeyFrame* pKF);
@@ -412,6 +420,12 @@ public:
 
     //BoW
     DBoW2::BowVector mBowVec;
+
+    // Task P3b: flat, sorted-by-WordId bag-of-words. Populated by ComputeBoW() only when
+    // ORB_MEM_FLATBOW=1, in which case mBowVec above is freed and this becomes the KeyFrame's
+    // resident BoW (read via GetBowFlat()). Empty when the knob is OFF. Not serialized -- the
+    // ORB_MEM_FLATBOW path is incompatible with boost map save/load, which the campaign does not use.
+    FlatBowVector mBowVecFlat;
 
     // Pose relative to parent (this is computed when bad flag is activated)
     Sophus::SE3f mTcp;

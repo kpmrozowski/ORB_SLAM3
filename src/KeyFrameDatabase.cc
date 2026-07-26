@@ -19,6 +19,7 @@
 
 #include "KeyFrameDatabase.h"
 
+#include "FlatBowVector.h"
 #include "KeyFrame.h"
 #include "Thirdparty/DBoW2/DBoW2/BowVector.h"
 
@@ -41,15 +42,43 @@ void KeyFrameDatabase::add(KeyFrame *pKF)
 {
     unique_lock<mutex> lock(mMutex);
 
-    for(DBoW2::BowVector::const_iterator vit= pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit!=vend; vit++)
-        mvInvertedFile[vit->first].push_back(pKF);
+    // Task P3b: under ORB_MEM_FLATBOW the std::map mBowVec is freed at ComputeBoW time, so index
+    // the KeyFrame off its resident flat BoW; OFF keeps the stock map walk. Both carry the same
+    // ascending WordId sequence, so the inverted file is populated identically.
+    if(KeyFrame::IsFlatBowEnabled())
+    {
+        for(const std::pair<DBoW2::WordId, DBoW2::WordValue>& bow_entry : pKF->GetBowFlat())
+        {
+            mvInvertedFile[bow_entry.first].push_back(pKF);
+        }
+    }
+    else
+    {
+        for(DBoW2::BowVector::const_iterator vit= pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit!=vend; vit++)
+            mvInvertedFile[vit->first].push_back(pKF);
+    }
 }
 
 void KeyFrameDatabase::erase(KeyFrame* pKF)
 {
     unique_lock<mutex> lock(mMutex);
 
-    // Erase elements in the Inverse File for the entry
+    // Erase elements in the Inverse File for the entry. Task P3b: iterate the flat BoW when
+    // ORB_MEM_FLATBOW is on (the map is freed); the erased word buckets are the same either way.
+    if(KeyFrame::IsFlatBowEnabled())
+    {
+        for(const std::pair<DBoW2::WordId, DBoW2::WordValue>& bow_entry : pKF->GetBowFlat())
+        {
+            PostingList &lKFs = mvInvertedFile[bow_entry.first];
+            const PostingList::iterator lit = std::find(lKFs.begin(), lKFs.end(), pKF);
+            if(lit != lKFs.end())
+            {
+                lKFs.erase(lit);
+            }
+        }
+        return;
+    }
+
     for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit!=vend; vit++)
     {
         // Posting list of keyframes that share the word
@@ -118,28 +147,20 @@ vector<KeyFrame*> KeyFrameDatabase::DetectLoopCandidates(KeyFrame* pKF, float mi
     {
         unique_lock<mutex> lock(mMutex);
 
-        for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
+        // Task P3b: word source honors ORB_MEM_FLATBOW; the per-word body is shared (see
+        // CollectLoopSharingWord) so OFF and ON collect identical sharing-word candidates.
+        if(KeyFrame::IsFlatBowEnabled())
         {
-            PostingList &lKFs = mvInvertedFile[vit->first];
-
-            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            for(const std::pair<DBoW2::WordId, DBoW2::WordValue>& bow_entry : pKF->GetBowFlat())
             {
-                KeyFrame* pKFi=*lit;
-                if(pKFi->GetMap()==pKF->GetMap()) // For consider a loop candidate it a candidate it must be in the same map
-                {
-                    if(pKFi->mnLoopQuery!=pKF->mnId)
-                    {
-                        pKFi->mnLoopWords=0;
-                        if(!spConnectedKeyFrames.count(pKFi))
-                        {
-                            pKFi->mnLoopQuery=pKF->mnId;
-                            lKFsSharingWords.push_back(pKFi);
-                        }
-                    }
-                    pKFi->mnLoopWords++;
-                }
-
-
+                CollectLoopSharingWord(bow_entry.first, pKF, spConnectedKeyFrames, lKFsSharingWords);
+            }
+        }
+        else
+        {
+            for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
+            {
+                CollectLoopSharingWord(vit->first, pKF, spConnectedKeyFrames, lKFsSharingWords);
             }
         }
     }
@@ -170,7 +191,7 @@ vector<KeyFrame*> KeyFrameDatabase::DetectLoopCandidates(KeyFrame* pKF, float mi
         {
             nscores++;
 
-            float si = mpVoc->score(pKF->mBowVec,pKFi->mBowVec);
+            float si = ScoreBow(pKF,pKFi);
 
             pKFi->mLoopScore = si;
             if(si>=minScore)
@@ -246,39 +267,21 @@ void KeyFrameDatabase::DetectCandidates(KeyFrame* pKF, float minScore,vector<Key
     {
         unique_lock<mutex> lock(mMutex);
 
-        for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
+        // Task P3b: word source honors ORB_MEM_FLATBOW; shared body in CollectLoopMergeSharingWord.
+        if(KeyFrame::IsFlatBowEnabled())
         {
-            PostingList &lKFs = mvInvertedFile[vit->first];
-
-            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            for(const std::pair<DBoW2::WordId, DBoW2::WordValue>& bow_entry : pKF->GetBowFlat())
             {
-                KeyFrame* pKFi=*lit;
-                if(pKFi->GetMap()==pKF->GetMap()) // For consider a loop candidate it a candidate it must be in the same map
-                {
-                    if(pKFi->mnLoopQuery!=pKF->mnId)
-                    {
-                        pKFi->mnLoopWords=0;
-                        if(!spConnectedKeyFrames.count(pKFi))
-                        {
-                            pKFi->mnLoopQuery=pKF->mnId;
-                            lKFsSharingWordsLoop.push_back(pKFi);
-                        }
-                    }
-                    pKFi->mnLoopWords++;
-                }
-                else if(!pKFi->GetMap()->IsBad())
-                {
-                    if(pKFi->mnMergeQuery!=pKF->mnId)
-                    {
-                        pKFi->mnMergeWords=0;
-                        if(!spConnectedKeyFrames.count(pKFi))
-                        {
-                            pKFi->mnMergeQuery=pKF->mnId;
-                            lKFsSharingWordsMerge.push_back(pKFi);
-                        }
-                    }
-                    pKFi->mnMergeWords++;
-                }
+                CollectLoopMergeSharingWord(bow_entry.first, pKF, spConnectedKeyFrames,
+                                            lKFsSharingWordsLoop, lKFsSharingWordsMerge);
+            }
+        }
+        else
+        {
+            for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
+            {
+                CollectLoopMergeSharingWord(vit->first, pKF, spConnectedKeyFrames,
+                                            lKFsSharingWordsLoop, lKFsSharingWordsMerge);
             }
         }
     }
@@ -311,7 +314,7 @@ void KeyFrameDatabase::DetectCandidates(KeyFrame* pKF, float minScore,vector<Key
             {
                 nscores++;
 
-                float si = mpVoc->score(pKF->mBowVec,pKFi->mBowVec);
+                float si = ScoreBow(pKF,pKFi);
 
                 pKFi->mLoopScore = si;
                 if(si>=minScore)
@@ -399,7 +402,7 @@ void KeyFrameDatabase::DetectCandidates(KeyFrame* pKF, float minScore,vector<Key
             {
                 nscores++;
 
-                float si = mpVoc->score(pKF->mBowVec,pKFi->mBowVec);
+                float si = ScoreBow(pKF,pKFi);
 
                 pKFi->mMergeScore = si;
                 if(si>=minScore)
@@ -462,6 +465,24 @@ void KeyFrameDatabase::DetectCandidates(KeyFrame* pKF, float minScore,vector<Key
 
     }
 
+    // Task P3b: reset query flags for every KeyFrame sharing a word with pKF; word source honors
+    // ORB_MEM_FLATBOW (the visited word buckets are identical either way).
+    if(KeyFrame::IsFlatBowEnabled())
+    {
+        for(const std::pair<DBoW2::WordId, DBoW2::WordValue>& bow_entry : pKF->GetBowFlat())
+        {
+            PostingList &lKFs = mvInvertedFile[bow_entry.first];
+
+            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            {
+                KeyFrame* pKFi=*lit;
+                pKFi->mnLoopQuery=-1;
+                pKFi->mnMergeQuery=-1;
+            }
+        }
+        return;
+    }
+
     for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
     {
         PostingList &lKFs = mvInvertedFile[vit->first];
@@ -487,25 +508,19 @@ void KeyFrameDatabase::DetectBestCandidates(KeyFrame *pKF, vector<KeyFrame*> &vp
 
         spConnectedKF = pKF->GetConnectedKeyFrames();
 
-        for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
+        // Task P3b: word source honors ORB_MEM_FLATBOW; shared body in CollectPlaceSharingWordBest.
+        if(KeyFrame::IsFlatBowEnabled())
         {
-            PostingList &lKFs = mvInvertedFile[vit->first];
-
-            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            for(const std::pair<DBoW2::WordId, DBoW2::WordValue>& bow_entry : pKF->GetBowFlat())
             {
-                KeyFrame* pKFi=*lit;
-                if(spConnectedKF.find(pKFi) != spConnectedKF.end())
-                {
-                    continue;
-                }
-                if(pKFi->mnPlaceRecognitionQuery!=pKF->mnId)
-                {
-                    pKFi->mnPlaceRecognitionWords=0;
-                    pKFi->mnPlaceRecognitionQuery=pKF->mnId;
-                    lKFsSharingWords.push_back(pKFi);
-                }
-               pKFi->mnPlaceRecognitionWords++;
-
+                CollectPlaceSharingWordBest(bow_entry.first, pKF, spConnectedKF, lKFsSharingWords);
+            }
+        }
+        else
+        {
+            for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
+            {
+                CollectPlaceSharingWordBest(vit->first, pKF, spConnectedKF, lKFsSharingWords);
             }
         }
     }
@@ -539,7 +554,7 @@ void KeyFrameDatabase::DetectBestCandidates(KeyFrame *pKF, vector<KeyFrame*> &vp
         if(pKFi->mnPlaceRecognitionWords>minCommonWords)
         {
             nscores++;
-            float si = mpVoc->score(pKF->mBowVec,pKFi->mBowVec);
+            float si = ScoreBow(pKF,pKFi);
             pKFi->mPlaceRecognitionScore=si;
             lScoreAndMatch.push_back(make_pair(si,pKFi));
         }
@@ -623,25 +638,19 @@ void KeyFrameDatabase::DetectNBestCandidates(KeyFrame *pKF, vector<KeyFrame*> &v
 
         spConnectedKF = pKF->GetConnectedKeyFrames();
 
-        for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
+        // Task P3b: word source honors ORB_MEM_FLATBOW; shared body in CollectPlaceSharingWordNBest.
+        if(KeyFrame::IsFlatBowEnabled())
         {
-            PostingList &lKFs = mvInvertedFile[vit->first];
-
-            for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+            for(const std::pair<DBoW2::WordId, DBoW2::WordValue>& bow_entry : pKF->GetBowFlat())
             {
-                KeyFrame* pKFi=*lit;
-
-                if(pKFi->mnPlaceRecognitionQuery!=pKF->mnId)
-                {
-                    pKFi->mnPlaceRecognitionWords=0;
-                    if(!spConnectedKF.count(pKFi))
-                    {
-
-                        pKFi->mnPlaceRecognitionQuery=pKF->mnId;
-                        lKFsSharingWords.push_back(pKFi);
-                    }
-                }
-                pKFi->mnPlaceRecognitionWords++;
+                CollectPlaceSharingWordNBest(bow_entry.first, pKF, spConnectedKF, lKFsSharingWords);
+            }
+        }
+        else
+        {
+            for(DBoW2::BowVector::const_iterator vit=pKF->mBowVec.begin(), vend=pKF->mBowVec.end(); vit != vend; vit++)
+            {
+                CollectPlaceSharingWordNBest(vit->first, pKF, spConnectedKF, lKFsSharingWords);
             }
         }
     }
@@ -670,7 +679,7 @@ void KeyFrameDatabase::DetectNBestCandidates(KeyFrame *pKF, vector<KeyFrame*> &v
         if(pKFi->mnPlaceRecognitionWords>minCommonWords)
         {
             nscores++;
-            float si = mpVoc->score(pKF->mBowVec,pKFi->mBowVec);
+            float si = ScoreBow(pKF,pKFi);
             pKFi->mPlaceRecognitionScore=si;
             lScoreAndMatch.push_back(make_pair(si,pKFi));
         }
@@ -791,7 +800,7 @@ vector<KeyFrame*> KeyFrameDatabase::DetectRelocalizationCandidates(Frame *F, Map
         if(pKFi->mnRelocWords>minCommonWords)
         {
             nscores++;
-            float si = mpVoc->score(F->mBowVec,pKFi->mBowVec);
+            float si = ScoreBow(F,pKFi);
             pKFi->mRelocScore=si;
             lScoreAndMatch.push_back(make_pair(si,pKFi));
         }
@@ -863,6 +872,142 @@ void KeyFrameDatabase::SetORBVocabulary(ORBVocabulary* pORBVoc)
 
     mvInvertedFile.clear();
     mvInvertedFile.resize(mpVoc->size());
+}
+
+// ===== Task P3b helpers (ORB_MEM_FLATBOW) =========================================================
+// ScoreBow: bit-identical BoW similarity. OFF -> mpVoc->score (stock DBoW2::L1Scoring over the
+// std::map), ON -> FlatL1Score over the flat vectors. The four Collect* methods hold the ORIGINAL
+// per-word inverted-file bodies verbatim, so the OFF loops (still iterating mBowVec) and the ON
+// loops (iterating GetBowFlat()) run the identical code -- there is no separate copy to drift.
+
+double KeyFrameDatabase::ScoreBow(KeyFrame* const query, KeyFrame* const candidate) const
+{
+    if(KeyFrame::IsFlatBowEnabled())
+    {
+        return FlatL1Score(query->GetBowFlat(), candidate->GetBowFlat());
+    }
+    return mpVoc->score(query->mBowVec, candidate->mBowVec);
+}
+
+double KeyFrameDatabase::ScoreBow(Frame* const query, KeyFrame* const candidate) const
+{
+    if(KeyFrame::IsFlatBowEnabled())
+    {
+        // Mixed operand: the transient query Frame keeps its std::map BoW, the KeyFrame is flat.
+        return FlatL1Score(query->mBowVec, candidate->GetBowFlat());
+    }
+    return mpVoc->score(query->mBowVec, candidate->mBowVec);
+}
+
+void KeyFrameDatabase::CollectLoopSharingWord(const DBoW2::WordId word_id, KeyFrame* const query,
+                                              const set<KeyFrame*>& connected_key_frames,
+                                              list<KeyFrame*>& sharing_words)
+{
+    PostingList &lKFs = mvInvertedFile[word_id];
+
+    for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+    {
+        KeyFrame* pKFi=*lit;
+        if(pKFi->GetMap()==query->GetMap()) // For consider a loop candidate it a candidate it must be in the same map
+        {
+            if(pKFi->mnLoopQuery!=query->mnId)
+            {
+                pKFi->mnLoopWords=0;
+                if(!connected_key_frames.count(pKFi))
+                {
+                    pKFi->mnLoopQuery=query->mnId;
+                    sharing_words.push_back(pKFi);
+                }
+            }
+            pKFi->mnLoopWords++;
+        }
+    }
+}
+
+void KeyFrameDatabase::CollectLoopMergeSharingWord(const DBoW2::WordId word_id, KeyFrame* const query,
+                                                   const set<KeyFrame*>& connected_key_frames,
+                                                   list<KeyFrame*>& loop_sharing_words,
+                                                   list<KeyFrame*>& merge_sharing_words)
+{
+    PostingList &lKFs = mvInvertedFile[word_id];
+
+    for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+    {
+        KeyFrame* pKFi=*lit;
+        if(pKFi->GetMap()==query->GetMap()) // For consider a loop candidate it a candidate it must be in the same map
+        {
+            if(pKFi->mnLoopQuery!=query->mnId)
+            {
+                pKFi->mnLoopWords=0;
+                if(!connected_key_frames.count(pKFi))
+                {
+                    pKFi->mnLoopQuery=query->mnId;
+                    loop_sharing_words.push_back(pKFi);
+                }
+            }
+            pKFi->mnLoopWords++;
+        }
+        else if(!pKFi->GetMap()->IsBad())
+        {
+            if(pKFi->mnMergeQuery!=query->mnId)
+            {
+                pKFi->mnMergeWords=0;
+                if(!connected_key_frames.count(pKFi))
+                {
+                    pKFi->mnMergeQuery=query->mnId;
+                    merge_sharing_words.push_back(pKFi);
+                }
+            }
+            pKFi->mnMergeWords++;
+        }
+    }
+}
+
+void KeyFrameDatabase::CollectPlaceSharingWordBest(const DBoW2::WordId word_id, KeyFrame* const query,
+                                                   const set<KeyFrame*>& connected_key_frames,
+                                                   list<KeyFrame*>& sharing_words)
+{
+    PostingList &lKFs = mvInvertedFile[word_id];
+
+    for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+    {
+        KeyFrame* pKFi=*lit;
+        if(connected_key_frames.find(pKFi) != connected_key_frames.end())
+        {
+            continue;
+        }
+        if(pKFi->mnPlaceRecognitionQuery!=query->mnId)
+        {
+            pKFi->mnPlaceRecognitionWords=0;
+            pKFi->mnPlaceRecognitionQuery=query->mnId;
+            sharing_words.push_back(pKFi);
+        }
+       pKFi->mnPlaceRecognitionWords++;
+    }
+}
+
+void KeyFrameDatabase::CollectPlaceSharingWordNBest(const DBoW2::WordId word_id, KeyFrame* const query,
+                                                    const set<KeyFrame*>& connected_key_frames,
+                                                    list<KeyFrame*>& sharing_words)
+{
+    PostingList &lKFs = mvInvertedFile[word_id];
+
+    for(PostingList::iterator lit=lKFs.begin(), lend= lKFs.end(); lit!=lend; lit++)
+    {
+        KeyFrame* pKFi=*lit;
+
+        if(pKFi->mnPlaceRecognitionQuery!=query->mnId)
+        {
+            pKFi->mnPlaceRecognitionWords=0;
+            if(!connected_key_frames.count(pKFi))
+            {
+
+                pKFi->mnPlaceRecognitionQuery=query->mnId;
+                sharing_words.push_back(pKFi);
+            }
+        }
+        pKFi->mnPlaceRecognitionWords++;
+    }
 }
 
 } //namespace ORB_SLAM

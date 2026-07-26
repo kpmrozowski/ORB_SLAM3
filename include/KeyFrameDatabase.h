@@ -84,6 +84,31 @@ public:
 
 protected:
 
+   // Task P3b (ORB_MEM_FLATBOW): BoW similarity honoring the knob. OFF -> stock mpVoc->score (the
+   // std::map path, byte-for-byte); ON -> FlatL1Score over the flat vectors, bit-identical to
+   // DBoW2::L1Scoring. Argument order matches the stock mpVoc->score(v1, v2) calls these replace
+   // (first == v1 == vi in the L1 accumulation), so the floating-point result is unchanged.
+   double ScoreBow(KeyFrame* const query, KeyFrame* const candidate) const;
+   double ScoreBow(Frame* const query, KeyFrame* const candidate) const;
+
+   // Per-word inverted-file collection bodies, factored so the ON path (iterating a KeyFrame's flat
+   // BoW) and the OFF path (iterating its std::map BoW) execute ONE shared body: the two BoW forms
+   // carry the identical ascending WordId sequence, so the collected candidates are unchanged. Each
+   // is called with mMutex already held by the caller.
+   void CollectLoopSharingWord(const DBoW2::WordId word_id, KeyFrame* const query,
+                               const std::set<KeyFrame*>& connected_key_frames,
+                               std::list<KeyFrame*>& sharing_words);
+   void CollectLoopMergeSharingWord(const DBoW2::WordId word_id, KeyFrame* const query,
+                                    const std::set<KeyFrame*>& connected_key_frames,
+                                    std::list<KeyFrame*>& loop_sharing_words,
+                                    std::list<KeyFrame*>& merge_sharing_words);
+   void CollectPlaceSharingWordBest(const DBoW2::WordId word_id, KeyFrame* const query,
+                                    const std::set<KeyFrame*>& connected_key_frames,
+                                    std::list<KeyFrame*>& sharing_words);
+   void CollectPlaceSharingWordNBest(const DBoW2::WordId word_id, KeyFrame* const query,
+                                     const std::set<KeyFrame*>& connected_key_frames,
+                                     std::list<KeyFrame*>& sharing_words);
+
    // Associated vocabulary
    const ORBVocabulary* mpVoc;
 

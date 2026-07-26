@@ -93,6 +93,22 @@ public:
         return mCompactMode ? mpCompactVocabulary->Size() : mTextVocabulary.size();
     }
 
+    // Task P3b: the flat-BowVector scoring path (ORB_MEM_FLATBOW=1) hand-rolls DBoW2::L1Scoring
+    // and therefore only reproduces the L1_NORM / TF_IDF combination. Callers assert this before
+    // switching to that path. The compact path is L1_NORM/TF_IDF by construction --
+    // CompactVocabulary::Load() rejects any .cvoc that is not (see CompactVocabulary.cc), and the
+    // class holds a DBoW2::L1Scoring object unconditionally -- so it always answers true when in
+    // compact mode; the text path is queried directly.
+    bool UsesL1TfIdfScoring() const
+    {
+        if (mCompactMode)
+        {
+            return true;
+        }
+        return mTextVocabulary.getScoringType() == DBoW2::L1_NORM
+            && mTextVocabulary.getWeightingType() == DBoW2::TF_IDF;
+    }
+
 private:
     bool mCompactMode = false;
     DBoW2Vocabulary mTextVocabulary;

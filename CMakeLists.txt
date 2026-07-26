@@ -94,6 +94,7 @@ src/ICSeed.cc
 src/GpsOverlay.cc
 src/MemoryGovernor.cc
 src/CompactVocabulary.cc
+src/FlatBowVector.cc
 include/System.h
 include/Tracking.h
 include/LocalMapping.h
