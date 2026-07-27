@@ -39,6 +39,7 @@
 #include "BaroFusion.h"
 #include "MagFusion.h"
 #include "Converter.h"
+#include <MemoryGovernor.h>
 
 #include<mutex>
 
@@ -2676,14 +2677,23 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     const vector<KeyFrame*> vpNeighsKFs = pKF->GetVectorCovisibleKeyFrames();
     list<KeyFrame*> lpOptVisKFs;
 
+    // Task P6 (defense-in-depth): when culled MapPoints are actually freed
+    // (ORB_MEM_DELETE_QUARANTINE>0), a bad/shell KeyFrame must never be pulled into the inertial BA
+    // window -- a future cull change that frees KF payload (or the KFs themselves) would turn the
+    // mnBALocalForKF/mnBAFixedForKF writes below into a use-after-free. The IMU cull-splice in
+    // KeyFrameCulling keeps mPrevKF pointing only at live KFs, so this guard never fires on today's
+    // culler (no-op, md5-identical); it forecloses the UAF if that invariant is ever weakened.
+    // Gated on the knob so OFF mode is byte-identical to stock.
+    const bool quarantine_active = MemoryGovernor::DeleteQuarantineActive();
     vpOptimizableKFs.reserve(Nd);
     vpOptimizableKFs.push_back(pKF);
     pKF->mnBALocalForKF = pKF->mnId;
     for(int i=1; i<Nd; i++)
     {
-        if(vpOptimizableKFs.back()->mPrevKF)
+        KeyFrame* const prev_kf = vpOptimizableKFs.back()->mPrevKF;
+        if(prev_kf && !(quarantine_active && prev_kf->isBad()))
         {
-            vpOptimizableKFs.push_back(vpOptimizableKFs.back()->mPrevKF);
+            vpOptimizableKFs.push_back(prev_kf);
             vpOptimizableKFs.back()->mnBALocalForKF = pKF->mnId;
         }
         else
@@ -2711,11 +2721,14 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     }
 
     // Fixed Keyframe: First frame previous KF to optimization window)
+    // Same P6 defense-in-depth guard as the window walk above: a shell boundary predecessor is
+    // treated as "no predecessor" (fix the oldest optimizable KF itself) rather than dereferenced.
     list<KeyFrame*> lFixedKeyFrames;
-    if(vpOptimizableKFs.back()->mPrevKF)
+    KeyFrame* const boundary_prev_kf = vpOptimizableKFs.back()->mPrevKF;
+    if(boundary_prev_kf && !(quarantine_active && boundary_prev_kf->isBad()))
     {
-        lFixedKeyFrames.push_back(vpOptimizableKFs.back()->mPrevKF);
-        vpOptimizableKFs.back()->mPrevKF->mnBAFixedForKF=pKF->mnId;
+        lFixedKeyFrames.push_back(boundary_prev_kf);
+        boundary_prev_kf->mnBAFixedForKF=pKF->mnId;
     }
     else
     {

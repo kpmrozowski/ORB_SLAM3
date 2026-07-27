@@ -440,6 +440,10 @@ public:
     // outside KeyFrame ever writes it (every other call site only reads), so this is safe;
     // read-only external access is unaffected since a non-const member binds fine to a const
     // reference/parameter everywhere it is currently read.
+    // Task P3c: mvKeys (the DISTORTED keypoints) may ALSO be empty on a live mono KeyFrame under
+    // ORB_MEM_DROP_MONO_DEADFIELDS=1 -- the ctor releases it right away for a provably-mono frame.
+    // Any new reader must route the undistorted keypoints through GetKeysUn() (never touch mvKeys
+    // directly), or gate a genuine mvKeys use on NLeft!=-1 (stereo/fisheye, where mvKeys is kept).
     std::vector<cv::KeyPoint> mvKeys;
 
     //BoW

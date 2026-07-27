@@ -26,6 +26,7 @@
 #include "MagFusion.h"
 #include "Converter.h"
 #include "GeometricTools.h"
+#include <MemoryGovernor.h>
 
 #include<mutex>
 #include<chrono>
@@ -657,14 +658,25 @@ void LocalMapping::CreateNewMapPoints()
 
     if (mbInertial)
     {
+        // Task P6 (defense-in-depth): stop the temporal walk if the predecessor is a bad/shell
+        // KeyFrame while culled MapPoints are actually freed (ORB_MEM_DELETE_QUARANTINE>0) -- its
+        // payload could be freed and the following pKF->mPrevKF read would be a use-after-free.
+        // The IMU cull-splice in KeyFrameCulling keeps mPrevKF pointing only at live KFs, so this
+        // never fires on today's culler (no-op, md5-identical). Gated on the knob (OFF == stock).
+        const bool quarantine_active = MemoryGovernor::DeleteQuarantineActive();
         KeyFrame* pKF = mpCurrentKeyFrame;
         int count=0;
         while((vpNeighKFs.size()<=nn)&&(pKF->mPrevKF)&&(count++<nn))
         {
-            vector<KeyFrame*>::iterator it = std::find(vpNeighKFs.begin(), vpNeighKFs.end(), pKF->mPrevKF);
+            KeyFrame* const prev_kf = pKF->mPrevKF;
+            if(quarantine_active && prev_kf->isBad())
+            {
+                break;
+            }
+            vector<KeyFrame*>::iterator it = std::find(vpNeighKFs.begin(), vpNeighKFs.end(), prev_kf);
             if(it==vpNeighKFs.end())
-                vpNeighKFs.push_back(pKF->mPrevKF);
-            pKF = pKF->mPrevKF;
+                vpNeighKFs.push_back(prev_kf);
+            pKF = prev_kf;
         }
     }
 

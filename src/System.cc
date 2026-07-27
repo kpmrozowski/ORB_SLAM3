@@ -201,6 +201,35 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         }
     }
 
+    // Cross-guard (Task P3b/P3c/P3d reviews): the lossy/free memory-reduction knobs free or empty
+    // per-KeyFrame/per-MapPoint state that boost atlas (de)serialization assumes is fully populated
+    // (ORB_MEM_FLATBOW frees mBowVec, ORB_MEM_DROP_MONO_DEADFIELDS frees mvKeys/mvuRight/mvDepth,
+    // ORB_MEM_BUDGET_MB evicts payload to disk, ORB_MEM_DELETE_QUARANTINE deletes culled MapPoints).
+    // Saving or loading an atlas with any of them on would silently persist/restore a corrupt map.
+    // The eval never touches atlas I/O (both paths stay empty here), so this is md5-neutral, but it
+    // hard-stops the silent-corruption footgun on any config that does configure atlas persistence.
+    const char* const flatbow_env = std::getenv("ORB_MEM_FLATBOW");
+    const char* const drop_mono_env = std::getenv("ORB_MEM_DROP_MONO_DEADFIELDS");
+    const char* const budget_env = std::getenv("ORB_MEM_BUDGET_MB");
+    const char* const quarantine_env = std::getenv("ORB_MEM_DELETE_QUARANTINE");
+    const bool flatbow_on = flatbow_env != nullptr && std::atoi(flatbow_env) != 0;
+    const bool drop_mono_on = drop_mono_env != nullptr && std::atoi(drop_mono_env) != 0;
+    const bool budget_on = budget_env != nullptr && std::atoi(budget_env) > 0;
+    const bool quarantine_on = quarantine_env != nullptr && std::atoi(quarantine_env) > 0;
+    const bool lossy_knob_active = flatbow_on || drop_mono_on || budget_on || quarantine_on;
+    const bool atlas_io_configured =
+        !mStrLoadAtlasFromFile.empty() || !mStrSaveAtlasToFile.empty();
+    if(lossy_knob_active && atlas_io_configured)
+    {
+        cerr << "FATAL: a lossy memory-reduction knob (ORB_MEM_FLATBOW / "
+                "ORB_MEM_DROP_MONO_DEADFIELDS / ORB_MEM_BUDGET_MB / ORB_MEM_DELETE_QUARANTINE) is "
+                "active together with atlas persistence (System.LoadAtlasFromFile / "
+                "System.SaveAtlasToFile). These knobs free/empty per-KeyFrame/per-MapPoint state "
+                "that boost serialization assumes is populated, so the persisted atlas would be "
+                "silently corrupted. Disable atlas I/O or the memory knobs. Aborting." << endl;
+        std::abort();
+    }
+
     node = fsSettings["loopClosing"];
     bool activeLC = true;
     if(!node.empty())

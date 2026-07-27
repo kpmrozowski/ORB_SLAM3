@@ -92,10 +92,12 @@ KeyFrame::KeyFrame():
         mnTrackReferenceForFrame(0), mnFuseTargetForKF(0), mnBALocalForKF(0), mnBAFixedForKF(0), mnBALocalForMerge(0),
         mnLoopQuery(0), mnLoopWords(0), mnRelocQuery(0), mnRelocWords(0), mnMergeQuery(0), mnMergeWords(0), mnBAGlobalForKF(0),
         fx(0), fy(0), cx(0), cy(0), invfx(0), invfy(0), mnPlaceRecognitionQuery(0), mnPlaceRecognitionWords(0), mPlaceRecognitionScore(0),
-        mbf(0), mb(0), mThDepth(0), N(0), mvKeys(static_cast<vector<cv::KeyPoint> >(NULL)), mvKeysUnData(static_cast<vector<cv::KeyPoint> >(NULL)),
-        mvuRight(static_cast<vector<float> >(NULL)), mvDepth(static_cast<vector<float> >(NULL)), mnScaleLevels(0), mfScaleFactor(0),
+        mbf(0), mb(0), mThDepth(0), N(0), mvKeys(static_cast<vector<cv::KeyPoint> >(NULL)),
+        mnScaleLevels(0), mfScaleFactor(0),
         mfLogScaleFactor(0), mvScaleFactors(0), mvLevelSigma2(0), mvInvLevelSigma2(0), mnMinX(0), mnMinY(0), mnMaxX(0),
-        mnMaxY(0), mPrevKF(static_cast<KeyFrame*>(NULL)), mNextKF(static_cast<KeyFrame*>(NULL)), mbFirstConnection(true), mpParent(NULL), mbNotErase(false),
+        mnMaxY(0), mPrevKF(static_cast<KeyFrame*>(NULL)), mNextKF(static_cast<KeyFrame*>(NULL)),
+        mvKeysUnData(static_cast<vector<cv::KeyPoint> >(NULL)), mvuRight(static_cast<vector<float> >(NULL)), mvDepth(static_cast<vector<float> >(NULL)),
+        mbFirstConnection(true), mpParent(NULL), mbNotErase(false),
         mbToBeErased(false), mbBad(false), mHalfBaseline(0), mbCurrentPlaceRecognition(false), mnMergeCorrectedForKF(0),
         NLeft(0),NRight(0), mnNumberOfOpt(0), mbHasVelocity(false)
 {
@@ -108,13 +110,15 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     mnTrackReferenceForFrame(0), mnFuseTargetForKF(0), mnBALocalForKF(0), mnBAFixedForKF(0), mnBALocalForMerge(0),
     mnLoopQuery(0), mnLoopWords(0), mnRelocQuery(0), mnRelocWords(0), mnBAGlobalForKF(0), mnPlaceRecognitionQuery(0), mnPlaceRecognitionWords(0), mPlaceRecognitionScore(0),
     fx(F.fx), fy(F.fy), cx(F.cx), cy(F.cy), invfx(F.invfx), invfy(F.invfy),
-    mbf(F.mbf), mb(F.mb), mThDepth(F.mThDepth), N(F.N), mvKeys(F.mvKeys), mvKeysUnData(F.mvKeysUn),
-    mvuRight(F.mvuRight), mvDepth(F.mvDepth), mDescriptorsData(F.mDescriptors.clone()),
-    mBowVec(F.mBowVec), mFeatVecData(F.mFeatVec), mnScaleLevels(F.mnScaleLevels), mfScaleFactor(F.mfScaleFactor),
+    mbf(F.mbf), mb(F.mb), mThDepth(F.mThDepth), N(F.N), mvKeys(F.mvKeys),
+    mBowVec(F.mBowVec), mnScaleLevels(F.mnScaleLevels), mfScaleFactor(F.mfScaleFactor),
     mfLogScaleFactor(F.mfLogScaleFactor), mvScaleFactors(F.mvScaleFactors), mvLevelSigma2(F.mvLevelSigma2),
     mvInvLevelSigma2(F.mvInvLevelSigma2), mnMinX(F.mnMinX), mnMinY(F.mnMinY), mnMaxX(F.mnMaxX),
     mnMaxY(F.mnMaxY), mK_(F.mK_), mPrevKF(NULL), mNextKF(NULL), mpImuPreintegrated(F.mpImuPreintegrated),
-    mImuCalib(F.mImuCalib), mvpMapPoints(F.mvpMapPoints), mpKeyFrameDB(pKFDB),
+    mImuCalib(F.mImuCalib),
+    mvKeysUnData(F.mvKeysUn), mDescriptorsData(F.mDescriptors.clone()), mFeatVecData(F.mFeatVec),
+    mvuRight(F.mvuRight), mvDepth(F.mvDepth),
+    mvpMapPoints(F.mvpMapPoints), mpKeyFrameDB(pKFDB),
     mpORBvocabulary(F.mpORBvocabulary), mbFirstConnection(true), mpParent(NULL), mDistCoef(F.mDistCoef), mbNotErase(false), mnDataset(F.mnDataset),
     mbToBeErased(false), mbBad(false), mHalfBaseline(F.mb/2), mpMap(pMap), mbCurrentPlaceRecognition(false), mNameFile(F.mNameFile), mnMergeCorrectedForKF(0),
     mpCamera(F.mpCamera), mpCamera2(F.mpCamera2),
@@ -471,7 +475,7 @@ void KeyFrame::NullMapPointSlotsIn(const std::unordered_set<MapPoint*>& doomed)
         MapPoint* const slot_map_point = mvpMapPoints[slot_index];
         if(slot_map_point!=nullptr && doomed.find(slot_map_point)!=doomed.end())
         {
-            mvpMapPoints[slot_index]=static_cast<MapPoint*>(NULL);
+            mvpMapPoints[slot_index]=nullptr;
         }
     }
 }
@@ -1010,15 +1014,17 @@ bool KeyFrame::SpillSerialize(std::vector<std::uint8_t>& out_body)
     return true;
 }
 
-// Worker thread: install a faulted-in payload and rebuild the (never-spilled) grid, under
-// mMutexFeatures. Idempotent -- a concurrent WaitResident caller may have already installed it.
+// Worker thread (or a WaitResident caller that stole a queued load): install a faulted-in payload
+// and rebuild the (never-spilled) grid, under mMutexFeatures. Idempotency is keyed on the residency
+// ATOMIC, not on mDescriptorsData: the caller reaches here only after winning the exclusive CAS to
+// kLoading (see SpillWorker::WaitResident / WorkerLoop, which check PayloadPresent() before the
+// CAS), so exactly one agent installs per fault-in and no double-install can happen. Keying the
+// guard on !mDescriptorsData.empty() would misfire under ORB_MEM_PARANOIA=1: ReleaseBadPayload()
+// leaves a non-empty 1x1 0xAA poison sentinel in mDescriptorsData, which would short-circuit the
+// install and leave mvKeysUnData empty -> OOB on the next GetKeysUn(). Install unconditionally.
 void KeyFrame::SpillInstall(const std::vector<std::uint8_t>& body)
 {
     unique_lock<mutex> lock(mMutexFeatures);
-    if (!mDescriptorsData.empty())
-    {
-        return;
-    }
     cv::Mat descriptors;
     std::vector<cv::KeyPoint> keys_undistorted;
     DBoW2::FeatureVector feature_vector;
