@@ -22,6 +22,7 @@
 
 #include<mutex>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -144,13 +145,39 @@ KeyFrame* MapPoint::GetReferenceKeyFrame()
     return mpRefKF;
 }
 
+bool MapPoint::observation_key_less(const ObservationEntry& entry, const long unsigned int key_id)
+{
+    return entry.first->mnId < key_id;
+}
+
+MapPoint::ObservationVector::const_iterator MapPoint::find_observation(
+    const ObservationVector& observations, KeyFrame* const pKF)
+{
+    const long unsigned int key_id = pKF->mnId;
+    const ObservationVector::const_iterator lower = std::lower_bound(
+        observations.begin(), observations.end(), key_id, &MapPoint::observation_key_less);
+    if(lower != observations.end() && lower->first->mnId == key_id)
+    {
+        return lower;
+    }
+    return observations.end();
+}
+
+MapPoint::ObservationVector::iterator MapPoint::lower_bound_observation(KeyFrame* const pKF)
+{
+    return std::lower_bound(
+        mObservations.begin(), mObservations.end(), pKF->mnId, &MapPoint::observation_key_less);
+}
+
 void MapPoint::AddObservation(KeyFrame* pKF, int idx)
 {
     unique_lock<mutex> lock(mMutexFeatures);
-    tuple<int,int> indexes;
+    const ObservationVector::iterator lower = lower_bound_observation(pKF);
+    const bool found = (lower != mObservations.end() && lower->first->mnId == pKF->mnId);
 
-    if(mObservations.count(pKF)){
-        indexes = mObservations[pKF];
+    tuple<int,int> indexes;
+    if(found){
+        indexes = lower->second;
     }
     else{
         indexes = tuple<int,int>(-1,-1);
@@ -163,7 +190,15 @@ void MapPoint::AddObservation(KeyFrame* pKF, int idx)
         get<0>(indexes) = idx;
     }
 
-    mObservations[pKF]=indexes;
+    if(found){
+        // Same-mnId key already present: replace the payload only, keeping the stored KeyFrame*
+        // exactly as std::map::operator[] did (the key is never rebound on an existing entry).
+        lower->second = indexes;
+    }
+    else{
+        // Insert at the lower-bound position, keeping mObservations sorted ascending by mnId.
+        mObservations.insert(lower, ObservationEntry(pKF, indexes));
+    }
 
     if(!pKF->mpCamera2 && pKF->GetKpURight(idx)>=0)
         nObs+=2;
@@ -176,9 +211,10 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
     bool bBad=false;
     {
         unique_lock<mutex> lock(mMutexFeatures);
-        if(mObservations.count(pKF))
+        const ObservationVector::iterator it = lower_bound_observation(pKF);
+        if(it != mObservations.end() && it->first->mnId == pKF->mnId)
         {
-            tuple<int,int> indexes = mObservations[pKF];
+            tuple<int,int> indexes = it->second;
             int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
 
             if(leftIndex != -1){
@@ -191,10 +227,17 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
                 nObs--;
             }
 
-            mObservations.erase(pKF);
+            mObservations.erase(it);
 
-            if(mpRefKF==pKF)
-                mpRefKF=mObservations.begin()->first;
+            // Reproduces the old `mpRefKF = mObservations.begin()->first`: the smallest-mnId
+            // remaining observer, which for the sorted vector is front(). Guarded against the
+            // empty case, where the old std::map dereferenced end() (undefined behaviour whose
+            // garbage result was immediately discarded because nObs<=2 sets the bad flag below and
+            // SetBadFlag never reads mpRefKF) — the guard leaves mpRefKF==pKF, equally unread, so
+            // the deterministic output is unchanged while a vector-front() dereference crash is
+            // avoided.
+            if(mpRefKF==pKF && !mObservations.empty())
+                mpRefKF=mObservations.front().first;
 
             // If only 2 observations or less, discard point
             if(nObs<=2)
@@ -210,7 +253,15 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
 std::map<KeyFrame*, std::tuple<int,int>, IdLess>  MapPoint::GetObservations()
 {
     unique_lock<mutex> lock(mMutexFeatures);
-    return mObservations;
+    // Rebuild the historical return type from the flat vector. mObservations is sorted ascending
+    // by mnId and IdLess orders ascending by mnId, so emplace_hint(end(), ...) inserts in strictly
+    // increasing key order — an O(n) rebuild that yields a map iterating in the exact former order.
+    std::map<KeyFrame*, std::tuple<int,int>, IdLess> observations;
+    for(const ObservationEntry& entry : mObservations)
+    {
+        observations.emplace_hint(observations.end(), entry.first, entry.second);
+    }
+    return observations;
 }
 
 int MapPoint::Observations()
@@ -221,7 +272,7 @@ int MapPoint::Observations()
 
 void MapPoint::SetBadFlag()
 {
-    map<KeyFrame*, tuple<int,int>, IdLess> obs;
+    ObservationVector obs;
     {
         unique_lock<mutex> lock1(mMutexFeatures);
         unique_lock<mutex> lock2(mMutexPos);
@@ -229,10 +280,10 @@ void MapPoint::SetBadFlag()
         obs = mObservations;
         mObservations.clear();
     }
-    for(map<KeyFrame*, tuple<int,int>, IdLess>::iterator mit=obs.begin(), mend=obs.end(); mit!=mend; mit++)
+    for(const ObservationEntry& observation : obs)
     {
-        KeyFrame* pKF = mit->first;
-        int leftIndex = get<0>(mit -> second), rightIndex = get<1>(mit -> second);
+        KeyFrame* const pKF = observation.first;
+        const int leftIndex = get<0>(observation.second), rightIndex = get<1>(observation.second);
         if(leftIndex != -1){
             pKF->EraseMapPointMatch(leftIndex);
         }
@@ -297,7 +348,7 @@ void MapPoint::Replace(MapPoint* pMP)
         return;
 
     int nvisible, nfound;
-    map<KeyFrame*,tuple<int,int>,IdLess> obs;
+    ObservationVector obs;
     {
         unique_lock<mutex> lock1(mMutexFeatures);
         unique_lock<mutex> lock2(mMutexPos);
@@ -309,12 +360,12 @@ void MapPoint::Replace(MapPoint* pMP)
         mpReplaced = pMP;
     }
 
-    for(map<KeyFrame*,tuple<int,int>,IdLess>::iterator mit=obs.begin(), mend=obs.end(); mit!=mend; mit++)
+    for(const ObservationEntry& observation : obs)
     {
         // Replace measurement in keyframe
-        KeyFrame* pKF = mit->first;
+        KeyFrame* pKF = observation.first;
 
-        tuple<int,int> indexes = mit -> second;
+        tuple<int,int> indexes = observation.second;
         int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
 
         if(!pMP->IsInKeyFrame(pKF))
@@ -390,7 +441,7 @@ void MapPoint::ComputeDistinctiveDescriptors()
     // Retrieve all observed descriptors
     vector<cv::Mat> vDescriptors;
 
-    map<KeyFrame*,tuple<int,int>,IdLess> observations;
+    ObservationVector observations;
 
     {
         unique_lock<mutex> lock1(mMutexFeatures);
@@ -404,12 +455,12 @@ void MapPoint::ComputeDistinctiveDescriptors()
 
     vDescriptors.reserve(observations.size());
 
-    for(map<KeyFrame*,tuple<int,int>,IdLess>::iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
+    for(const ObservationEntry& observation : observations)
     {
-        KeyFrame* pKF = mit->first;
+        KeyFrame* pKF = observation.first;
 
         if(!pKF->isBad()){
-            tuple<int,int> indexes = mit -> second;
+            tuple<int,int> indexes = observation.second;
             int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
 
             if(leftIndex != -1){
@@ -481,8 +532,9 @@ cv::Mat MapPoint::GetDescriptor()
 tuple<int,int> MapPoint::GetIndexInKeyFrame(KeyFrame *pKF)
 {
     unique_lock<mutex> lock(mMutexFeatures);
-    if(mObservations.count(pKF))
-        return mObservations[pKF];
+    const ObservationVector::const_iterator it = find_observation(mObservations, pKF);
+    if(it != mObservations.end())
+        return it->second;
     else
         return tuple<int,int>(-1,-1);
 }
@@ -490,12 +542,12 @@ tuple<int,int> MapPoint::GetIndexInKeyFrame(KeyFrame *pKF)
 bool MapPoint::IsInKeyFrame(KeyFrame *pKF)
 {
     unique_lock<mutex> lock(mMutexFeatures);
-    return (mObservations.count(pKF));
+    return find_observation(mObservations, pKF) != mObservations.end();
 }
 
 void MapPoint::UpdateNormalAndDepth()
 {
-    map<KeyFrame*,tuple<int,int>,IdLess> observations;
+    ObservationVector observations;
     KeyFrame* pRefKF;
     Eigen::Vector3f Pos;
     {
@@ -514,11 +566,11 @@ void MapPoint::UpdateNormalAndDepth()
     Eigen::Vector3f normal;
     normal.setZero();
     int n=0;
-    for(map<KeyFrame*,tuple<int,int>,IdLess>::iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
+    for(const ObservationEntry& observation : observations)
     {
-        KeyFrame* pKF = mit->first;
+        KeyFrame* pKF = observation.first;
 
-        tuple<int,int> indexes = mit -> second;
+        tuple<int,int> indexes = observation.second;
         int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
 
         if(leftIndex != -1){
@@ -538,7 +590,11 @@ void MapPoint::UpdateNormalAndDepth()
     Eigen::Vector3f PC = Pos - pRefKF->GetCameraCenter();
     const float dist = PC.norm();
 
-    tuple<int ,int> indexes = observations[pRefKF];
+    // Formerly observations[pRefKF]: pRefKF is always one of the observers, so this resolves to its
+    // stored (left,right) indexes. The absent-key fallback mirrors std::map::operator[], which
+    // would have value-initialized a (0,0) entry.
+    const ObservationVector::const_iterator ref_it = find_observation(observations, pRefKF);
+    tuple<int ,int> indexes = (ref_it != observations.end()) ? ref_it->second : tuple<int,int>();
     int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
     int level;
     if(pRefKF -> NLeft == -1){
@@ -618,10 +674,10 @@ int MapPoint::PredictScale(const float &currentDist, Frame* pF)
 void MapPoint::PrintObservations()
 {
     cout << "MP_OBS: MP " << mnId << endl;
-    for(map<KeyFrame*,tuple<int,int>,IdLess>::iterator mit=mObservations.begin(), mend=mObservations.end(); mit!=mend; mit++)
+    for(const ObservationEntry& observation : mObservations)
     {
-        KeyFrame* pKFi = mit->first;
-        tuple<int,int> indexes = mit->second;
+        KeyFrame* pKFi = observation.first;
+        tuple<int,int> indexes = observation.second;
         int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
         cout << "--OBS in KF " << pKFi->mnId << " in map " << pKFi->GetMap()->GetId() << endl;
     }
@@ -647,14 +703,21 @@ void MapPoint::PreSave(set<KeyFrame*, IdLess>& spKF,set<MapPoint*, IdLess>& spMP
 
     mBackupObservationsId1.clear();
     mBackupObservationsId2.clear();
-    // Save the id and position in each KF who view it
-    for(std::map<KeyFrame*,std::tuple<int,int>,IdLess>::const_iterator it = mObservations.begin(), end = mObservations.end(); it != end; ++it)
+    // Save the id and position in each KF who views it. EraseObservation() below mutates
+    // mObservations (and can trigger SetBadFlag, which clears it), so iterate over a snapshot in
+    // the same ascending-mnId order the former std::map produced rather than mutating the live
+    // container mid-walk (which the old code did through the map's stable-node erase semantics — a
+    // pattern a std::vector cannot reproduce safely). Erasing an already-absent KF is a no-op, so
+    // once a SetBadFlag cascade empties mObservations the remaining EraseObservation calls simply
+    // do nothing, exactly as the map version's post-clear count()==0 checks did.
+    const ObservationVector observations_snapshot = mObservations;
+    for(const ObservationEntry& observation : observations_snapshot)
     {
-        KeyFrame* pKFi = it->first;
+        KeyFrame* const pKFi = observation.first;
         if(spKF.find(pKFi) != spKF.end())
         {
-            mBackupObservationsId1[it->first->mnId] = get<0>(it->second);
-            mBackupObservationsId2[it->first->mnId] = get<1>(it->second);
+            mBackupObservationsId1[pKFi->mnId] = get<0>(observation.second);
+            mBackupObservationsId2[pKFi->mnId] = get<1>(observation.second);
         }
         else
         {
@@ -686,6 +749,10 @@ void MapPoint::PostLoad(map<long unsigned int, KeyFrame*>& mpKFid, map<long unsi
 
     mObservations.clear();
 
+    // mBackupObservationsId1 is a std::map keyed by KeyFrame mnId, so it iterates in ascending
+    // mnId order, and mpKFid[it->first] resolves the KeyFrame whose mnId == it->first. Appending
+    // the resolved observers in that order therefore builds mObservations already sorted ascending
+    // by mnId — the invariant every lookup/insert path relies on — with no post-sort needed.
     for(map<long unsigned int, int>::const_iterator it = mBackupObservationsId1.begin(), end = mBackupObservationsId1.end(); it != end; ++it)
     {
         KeyFrame* pKFi = mpKFid[it->first];
@@ -693,7 +760,7 @@ void MapPoint::PostLoad(map<long unsigned int, KeyFrame*>& mpKFid, map<long unsi
         std::tuple<int, int> indexes = tuple<int,int>(it->second,it2->second);
         if(pKFi)
         {
-           mObservations[pKFi] = indexes;
+           mObservations.emplace_back(pKFi, indexes);
         }
     }
 

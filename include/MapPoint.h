@@ -31,6 +31,9 @@
 #include <opencv2/core/core.hpp>
 #include <limits>
 #include <mutex>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include <boost/serialization/serialization.hpp>
 #include <boost/serialization/array.hpp>
@@ -240,8 +243,21 @@ protected:
      // Position in absolute coordinates
      Eigen::Vector3f mWorldPos;
 
-     // Keyframes observing the point and associated index in keyframe
-     std::map<KeyFrame*,std::tuple<int,int>,IdLess> mObservations;
+     // Keyframes observing the point and associated (left,right) feature index in each.
+     //
+     // Task P5 (memory reduction): a flat vector sorted ascending by KeyFrame::mnId, in place of
+     // the former std::map<KeyFrame*, std::tuple<int,int>, IdLess>. IdLess orders non-null keys by
+     // mnId and every observation key is a non-null KeyFrame, so the map iterated in ascending-mnId
+     // order — the flat vector reproduces that exact order. This removes the red-black-tree per-node
+     // overhead (three child/parent pointers + colour byte + malloc header, ~48B/node) for every
+     // observation, plus the ~48B empty-tree header carried by each MapPoint, in exchange for O(n)
+     // insert/erase via std::lower_bound by mnId (AddObservation/EraseObservation). Every public
+     // accessor keeps its former signature and observable behaviour (GetObservations() still returns
+     // the std::map, rebuilt in-order). Compile-in type change (like Task P2.5), not env-gated;
+     // rollback = git revert. See MapPoint.cc for the order-preservation argument.
+     using ObservationEntry = std::pair<KeyFrame*, std::tuple<int,int>>;
+     using ObservationVector = std::vector<ObservationEntry>;
+     ObservationVector mObservations;
      // For save relation without pointer, this is necessary for save/load function
      std::map<long unsigned int, int> mBackupObservationsId1;
      std::map<long unsigned int, int> mBackupObservationsId2;
@@ -289,6 +305,22 @@ protected:
      std::mutex mMutexPos;
      std::mutex mMutexFeatures;
      std::mutex mMutexMap;
+
+private:
+     // Task P5 flat-observations helpers. mObservations is kept sorted ascending by
+     // KeyFrame::mnId; all three assume the caller already holds mMutexFeatures.
+     //
+     // observation_key_less: the strict-weak ordering the vector is sorted by (an observation
+     //   entry precedes a key id when its KeyFrame's mnId is smaller) — the flat-vector analogue
+     //   of IdLess for the non-null keys mObservations always holds.
+     // find_observation: exact lookup by KeyFrame (binary search), end() if absent; static so it
+     //   can also search a local snapshot copy (e.g. in UpdateNormalAndDepth).
+     // lower_bound_observation: the insertion point in mObservations for pKF's mnId (the matched
+     //   entry when already present), for the mutating AddObservation/EraseObservation paths.
+     static bool observation_key_less(const ObservationEntry& entry, long unsigned int key_id);
+     static ObservationVector::const_iterator find_observation(const ObservationVector& observations,
+                                                               KeyFrame* pKF);
+     ObservationVector::iterator lower_bound_observation(KeyFrame* pKF);
 
 };
 
