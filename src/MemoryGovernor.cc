@@ -225,17 +225,33 @@ void MemoryGovernor::AppendStats(const double timestamp_seconds)
     mallinfo_free_mb = static_cast<long>(heap_info.fordblks / (1024 * 1024));
 #endif
 
+    const StatsCounters counters = GatherStatsCounters();
+
+    char row[640];
+    const int row_length = std::snprintf(
+        row, sizeof(row),
+        "%.6f,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%.3f,%.3f,%.3f\n",
+        timestamp_seconds, ReadVmRssKb() / 1024, ReadVmHwmKb() / 1024, mallinfo_inuse_mb,
+        mallinfo_free_mb, static_cast<long>(KeyFrame::nNextId), counters.kf_live, counters.kf_hot,
+        counters.kf_cold, counters.kf_shell, static_cast<long>(MapPoint::nNextId), counters.mp_live,
+        counters.maps_stored, counters.spill_mb, counters.faultins_total, counters.io_read_mb,
+        counters.io_write_mb, counters.io_throttle_ms);
+    if (row_length > 0 && static_cast<std::size_t>(row_length) < sizeof(row))
+    {
+        WriteAll(stats_fd, row, static_cast<std::size_t>(row_length));
+    }
+}
+
+MemoryGovernor::StatsCounters MemoryGovernor::GatherStatsCounters() const
+{
+    StatsCounters counters;
+
     // Atlas-derived counters: only read through mpAtlas when SetAtlas() has actually been called
     // (deterministic single-threaded mode is the only mode the stats CSV runs in per the plan).
     // GetAllKeyFrames()/GetAllMapPoints() each return a freshly-allocated vector, but the
     // allocation is transient (freed before this function returns) rather than persistent, which
     // bisection confirmed does not perturb the trajectory the way the persistent stream buffer
-    // above did.
-    long kf_live = 0;
-    long mp_live = 0;
-    long maps_stored = 0;
-    long kf_hot = 0;   // Task P3d: KeyFrames whose spillable payload is resident in RAM
-    long kf_cold = 0;  // Task P3d: KeyFrames whose payload has been evicted to the spill file
+    // in AppendStats() did.
     const bool spill_active = SpillActive();
     if (mpAtlas != nullptr)
     {
@@ -246,11 +262,11 @@ void MemoryGovernor::AppendStats(const double timestamp_seconds)
                 continue;
             }
             const std::vector<KeyFrame*> map_key_frames = current_map->GetAllKeyFrames();
-            kf_live += static_cast<long>(map_key_frames.size());
-            mp_live += static_cast<long>(current_map->GetAllMapPoints().size());
+            counters.kf_live += static_cast<long>(map_key_frames.size());
+            counters.mp_live += static_cast<long>(current_map->GetAllMapPoints().size());
             if (!current_map->IsInUse())
             {
-                ++maps_stored;
+                ++counters.maps_stored;
             }
             if (spill_active)
             {
@@ -264,11 +280,11 @@ void MemoryGovernor::AppendStats(const double timestamp_seconds)
                         key_frame->mSpillResidency.load(std::memory_order_acquire);
                     if (spill::PayloadPresent(state) || state == spill::kLoading)
                     {
-                        ++kf_hot;
+                        ++counters.kf_hot;
                     }
                     else
                     {
-                        ++kf_cold;
+                        ++counters.kf_cold;
                     }
                 }
             }
@@ -277,33 +293,17 @@ void MemoryGovernor::AppendStats(const double timestamp_seconds)
 
     // kf_shell is live as of Task P1; spill_mb/faultins/io_* are live as of Task P3d (0 when the
     // spill worker was never started, i.e. the budget is unset).
-    const long kf_shell = mKfShellReleased.load(std::memory_order_relaxed);
-    long spill_mb = 0;
-    long faultins_total = 0;
-    double io_read_mb = 0.0;
-    double io_write_mb = 0.0;
-    double io_throttle_ms = 0.0;
+    counters.kf_shell = mKfShellReleased.load(std::memory_order_relaxed);
     if (mSpillWorker != nullptr)
     {
-        spill_mb = static_cast<long>(mSpillWorker->SpillBytes() / (1024 * 1024));
-        faultins_total = mSpillWorker->SyncFaultins();
-        io_read_mb = mSpillWorker->IoReadMb();
-        io_write_mb = mSpillWorker->IoWriteMb();
-        io_throttle_ms = mSpillWorker->IoThrottleMs();
+        counters.spill_mb = static_cast<long>(mSpillWorker->SpillBytes() / (1024 * 1024));
+        counters.faultins_total = mSpillWorker->SyncFaultins();
+        counters.io_read_mb = mSpillWorker->IoReadMb();
+        counters.io_write_mb = mSpillWorker->IoWriteMb();
+        counters.io_throttle_ms = mSpillWorker->IoThrottleMs();
     }
 
-    char row[640];
-    const int row_length = std::snprintf(
-        row, sizeof(row),
-        "%.6f,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%.3f,%.3f,%.3f\n",
-        timestamp_seconds, ReadVmRssKb() / 1024, ReadVmHwmKb() / 1024, mallinfo_inuse_mb,
-        mallinfo_free_mb, static_cast<long>(KeyFrame::nNextId), kf_live, kf_hot, kf_cold,
-        kf_shell, static_cast<long>(MapPoint::nNextId), mp_live, maps_stored, spill_mb,
-        faultins_total, io_read_mb, io_write_mb, io_throttle_ms);
-    if (row_length > 0 && static_cast<std::size_t>(row_length) < sizeof(row))
-    {
-        WriteAll(stats_fd, row, static_cast<std::size_t>(row_length));
-    }
+    return counters;
 }
 
 void MemoryGovernor::SetTrackingWorkingSet(const std::vector<KeyFrame*>& local_key_frames,

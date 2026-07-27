@@ -289,6 +289,27 @@ private:
     // with O(1) membership via mDoomedScratch — negligible per-frame CPU.
     void SeverAndDeleteBatch();
 
+    // Per-sample Atlas/spill counters for one AppendStats() CSV row. Split out of AppendStats() so
+    // both functions stay within the single-responsibility size budget; pure data, populated by
+    // GatherStatsCounters().
+    struct StatsCounters
+    {
+        long kf_live = 0;
+        long mp_live = 0;
+        long maps_stored = 0;
+        long kf_hot = 0;   // Task P3d: KeyFrames whose spillable payload is resident in RAM
+        long kf_cold = 0;  // Task P3d: KeyFrames whose payload has been evicted to the spill file
+        long kf_shell = 0;
+        long spill_mb = 0;
+        long faultins_total = 0;
+        double io_read_mb = 0.0;
+        double io_write_mb = 0.0;
+        double io_throttle_ms = 0.0;
+    };
+
+    // Gather the Atlas-derived and spill-worker counters for one stats sample (see AppendStats()).
+    StatsCounters GatherStatsCounters() const;
+
     Atlas* mpAtlas = nullptr;
     std::atomic<long> mKfShellReleased{0};
 

@@ -198,6 +198,12 @@ void KeyFrame::ComputeBoW()
         AbortOnReleasedPayloadRead(mnId, "ComputeBoW");
     }
 
+    // Defensive fault-in for symmetry with the GetKeysUn()/GetDescriptorsMat()/GetFeatVec()
+    // accessors: ComputeBoW() reads the spillable mDescriptorsData/mFeatVecData directly below. Its
+    // only call sites (LocalMapping/Tracking) run on a freshly-created, resident KeyFrame, so this
+    // is a no-op today; it hardens the path should ComputeBoW() ever be reached on an evicted KF.
+    EnsureResident();
+
     // Task P3b: once the flat BoW is built the std::map mBowVec is freed, so the stock
     // empty()-guarded recompute below must not re-fire on a later ComputeBoW() call (the two
     // initialization KeyFrames are computed once in Tracking and again in LocalMapping). A non-empty

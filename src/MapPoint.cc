@@ -237,7 +237,9 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
             // the deterministic output is unchanged while a vector-front() dereference crash is
             // avoided.
             if(mpRefKF==pKF && !mObservations.empty())
+            {
                 mpRefKF=mObservations.front().first;
+            }
 
             // If only 2 observations or less, discard point
             if(nObs<=2)
@@ -534,9 +536,13 @@ tuple<int,int> MapPoint::GetIndexInKeyFrame(KeyFrame *pKF)
     unique_lock<mutex> lock(mMutexFeatures);
     const ObservationVector::const_iterator it = find_observation(mObservations, pKF);
     if(it != mObservations.end())
+    {
         return it->second;
+    }
     else
+    {
         return tuple<int,int>(-1,-1);
+    }
 }
 
 bool MapPoint::IsInKeyFrame(KeyFrame *pKF)

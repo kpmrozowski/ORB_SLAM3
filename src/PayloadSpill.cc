@@ -262,10 +262,10 @@ bool PayloadSpill::WriteRecord(const std::uint64_t kf_id, const int feature_coun
     std::uint8_t record_header[kRecordHeaderBytes] = {0};
     const std::uint32_t flags =
         spill::kFlagHasDesc | spill::kFlagHasKeysUn | spill::kFlagHasFeatVec;
-    const std::uint32_t n = static_cast<std::uint32_t>(feature_count);
+    const std::uint32_t feature_count_u32 = static_cast<std::uint32_t>(feature_count);
     std::memcpy(record_header + 0, &kf_id, 8);
     std::memcpy(record_header + 8, &flags, 4);
-    std::memcpy(record_header + 12, &n, 4);
+    std::memcpy(record_header + 12, &feature_count_u32, 4);
     std::memcpy(record_header + 16, &raw_len, 4);
     std::memcpy(record_header + 20, &raw_len, 4);  // comp_len == raw_len (no compression)
     std::memcpy(record_header + 24, &crc, 4);
