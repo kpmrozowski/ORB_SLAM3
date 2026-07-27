@@ -638,6 +638,14 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
         // the two Spin calls (enqueues happen inside the LocalMapping spin) and after Track
         // (the deferral exists precisely so the current frame can still read last tick's
         // culled payloads) -- see MemoryGovernor.h.
+        //
+        // Task P3d-evict: hand the governor THIS frame's tracking working set (the local window +
+        // reference KeyFrame) first, so the spill EvictionSweep() inside Tick() protects it (and its
+        // covisibles) from eviction instead of thrashing it in and out every frame. Must precede
+        // Tick(); mvpLocalKeyFrames is already repopulated by TrackLocalMap() above. No-op cost when
+        // spill is inactive.
+        MemoryGovernor::Instance().SetTrackingWorkingSet(mpTracker->GetLocalKeyFrames(),
+                                                         mpTracker->GetReferenceKeyFrame());
         MemoryGovernor::Instance().Tick();
         static const bool detDebug = getenv("ORB_DET_DEBUG") != nullptr;
         if (detDebug)

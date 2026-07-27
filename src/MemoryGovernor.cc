@@ -306,6 +306,15 @@ void MemoryGovernor::AppendStats(const double timestamp_seconds)
     }
 }
 
+void MemoryGovernor::SetTrackingWorkingSet(const std::vector<KeyFrame*>& local_key_frames,
+                                           KeyFrame* const reference_key_frame)
+{
+    // Store non-owning observers only (see MemoryGovernor.h); consumed by the EvictionSweep() that
+    // runs from the Tick() immediately following on the same thread. No allocation, no side effects.
+    mWorkingSetLocalKeyFrames = &local_key_frames;
+    mWorkingSetReferenceKeyFrame = reference_key_frame;
+}
+
 void MemoryGovernor::Tick()
 {
     // Task P1 reclaim path (independent of the P3d spill path below): zero per-tick cost when
@@ -398,10 +407,18 @@ void MemoryGovernor::EvictionSweep()
         return;
     }
 
-    // Protect set = the last W=60 created KeyFrames (a cheap proxy for the tracking local window /
-    // current covisibles: those are the most-recently-created ids). Eviction correctness does NOT
-    // depend on the protect set -- any evicted KeyFrame faults back to identical bytes on the next
-    // read -- it only bounds I/O churn on the active working set.
+    // Protect set (Task P3d-evict) = { last W=60 created KeyFrames } ∪ { current
+    // Tracking::mvpLocalKeyFrames } ∪ { reference KeyFrame's direct covisibles }. The recent window
+    // is the mnId check below; the live local window + covisibles come from mProtectScratch, built
+    // here from the working set System hands in each frame via SetTrackingWorkingSet(). Protecting
+    // the ACTUAL working set (not just the most-recently-created ids) keeps the tracking/local-BA
+    // set resident, collapsing the per-frame fault-in thrash to rare event-driven faults --
+    // revisits/loops can make an OLD (low-mnId) KeyFrame the current working set, which the recent
+    // window alone would evict and re-fault every frame. Eviction correctness does NOT depend on the
+    // protect set -- any evicted KeyFrame faults back to identical bytes on the next read -- it only
+    // bounds I/O churn on the active working set, so this stays a bit-identical residency-policy
+    // change.
+    PopulateProtectScratch();
     static const int hot_target = MemEnvInt("ORB_MEM_HOT_KFS", 150);
     static const long protect_window = 60;
     const long newest_id = static_cast<long>(KeyFrame::nNextId);
@@ -424,6 +441,10 @@ void MemoryGovernor::EvictionSweep()
         if (static_cast<long>(key_frame->mnId) >= newest_id - protect_window)
         {
             continue;  // protected recent window
+        }
+        if (mProtectScratch.count(key_frame) != 0)
+        {
+            continue;  // current tracking local window / reference covisibles -- keep resident
         }
         mEvictCandidatesScratch.push_back(key_frame);
     }
@@ -457,6 +478,33 @@ void MemoryGovernor::EvictionSweep()
             // Not yet spilled: write-behind now, evict at a subsequent tick once durable.
             mSpillWorker->EnqueueWrite(key_frame);
             ++enqueued;
+        }
+    }
+}
+
+void MemoryGovernor::PopulateProtectScratch()
+{
+    mProtectScratch.clear();
+    if (mWorkingSetLocalKeyFrames != nullptr)
+    {
+        for (KeyFrame* const local_key_frame : *mWorkingSetLocalKeyFrames)
+        {
+            if (local_key_frame != nullptr)
+            {
+                mProtectScratch.insert(local_key_frame);
+            }
+        }
+    }
+    if (mWorkingSetReferenceKeyFrame != nullptr && !mWorkingSetReferenceKeyFrame->isBad())
+    {
+        mProtectScratch.insert(mWorkingSetReferenceKeyFrame);
+        for (KeyFrame* const covisible_key_frame :
+             mWorkingSetReferenceKeyFrame->GetVectorCovisibleKeyFrames())
+        {
+            if (covisible_key_frame != nullptr)
+            {
+                mProtectScratch.insert(covisible_key_frame);
+            }
         }
     }
 }

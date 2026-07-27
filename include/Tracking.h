@@ -184,6 +184,14 @@ public:
 
     vector<MapPoint*> GetLocalMapMPS();
 
+    // Task P3d-evict — read-only views of the current tracking working set, handed to
+    // MemoryGovernor::SetTrackingWorkingSet() once per tracked frame so the spill EvictionSweep()
+    // protects the live local window (and the reference KeyFrame's covisibles) from eviction rather
+    // than thrashing it in and out every frame. mvpLocalKeyFrames is repopulated in TrackLocalMap()
+    // before the governor tick, so these reflect this frame's set. Non-owning; do not store.
+    const std::vector<KeyFrame*>& GetLocalKeyFrames() const { return mvpLocalKeyFrames; }
+    KeyFrame* GetReferenceKeyFrame() const { return mpReferenceKF; }
+
     bool mbWriteStats;
 
 #ifdef REGISTER_TIMES

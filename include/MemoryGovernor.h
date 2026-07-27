@@ -131,6 +131,19 @@ public:
     // (default 30); a no-op costing a single static-bool check when ORB_MEM_STATS_CSV is unset.
     void AppendStats(const double timestamp_seconds);
 
+    // Task P3d-evict — hand the governor the CURRENT tracking working set (Tracking::
+    // mvpLocalKeyFrames + reference KeyFrame) so the next EvictionSweep() protects it, plus the
+    // reference KeyFrame's direct covisibles, from spill eviction — not just the last-W-created
+    // window. Without this the active local/covisibility window is evicted and re-faulted every
+    // frame (the P3d thrash: ~160 fault-ins/frame). Call once per tracked frame from
+    // System::TrackMonocular(), immediately before Tick(), on the deterministic main thread. Stores
+    // only non-owning observers into Tracking's live state (see the members); a cheap store when
+    // spill is inactive (EvictionSweep never runs then). The referenced vector need only outlive the
+    // immediately-following Tick() — it does: it is Tracking's live member, same thread, unmutated
+    // in between.
+    void SetTrackingWorkingSet(const std::vector<KeyFrame*>& local_key_frames,
+                               KeyFrame* const reference_key_frame);
+
     // Per-KF-tick hook (Task P1): call once per tracked frame, after the deterministic
     // LocalMapping/LoopClosing spin (System::TrackMonocular). Releases the descriptor of
     // MapPoints enqueued before the previous tick (see the ORB_MEM_RECLAIM_BAD deferral note in
@@ -246,6 +259,13 @@ private:
     void EnsureSpillWorker();
     void EvictionSweep();
 
+    // Task P3d-evict — rebuild mProtectScratch for this tick from the working set handed in by
+    // SetTrackingWorkingSet(): { Tracking::mvpLocalKeyFrames } ∪ { reference KeyFrame } ∪ { its
+    // direct covisibles }. The last-W-created window is handled separately by the mnId check in
+    // EvictionSweep() and is not duplicated here. Read-only over live state; reuses the set's
+    // capacity across ticks (allocation-invariant per P0.5). Called once per EvictionSweep().
+    void PopulateProtectScratch();
+
     // Task P6 — move MapPoints whose K-keyframe quarantine has expired out of the FIFO
     // mDeleteQueue into the pending-scan batch, then (amortized: once every
     // ORB_MEM_DELETE_SCAN_EVERY ticks, or immediately once the batch exceeds
@@ -276,6 +296,18 @@ private:
     bool mSpillDisabled = false;                 // set if the spill file could not be opened
     std::atomic<long> mSpillTick{0};
     std::vector<KeyFrame*> mEvictCandidatesScratch;  // reused across ticks (no per-tick alloc)
+
+    // Task P3d-evict — current tracking working set, handed in by SetTrackingWorkingSet() right
+    // before each Tick() and consumed synchronously in the same-thread EvictionSweep() that
+    // immediately follows. Non-owning observers into Tracking's live state; refreshed every
+    // deterministic frame and never read across ticks, so they cannot dangle. nullptr until the
+    // first frame (and always, outside deterministic mode) -- EvictionSweep()/PopulateProtectScratch()
+    // guard on the pointer.
+    const std::vector<KeyFrame*>* mWorkingSetLocalKeyFrames = nullptr;
+    KeyFrame* mWorkingSetReferenceKeyFrame = nullptr;
+    // Per-tick eviction protect set (the local window + reference covisibles), rebuilt each sweep by
+    // PopulateProtectScratch(); reused across ticks (capacity retained via clear()).
+    std::unordered_set<KeyFrame*> mProtectScratch;
 
     // Two-phase deferred-release queue for MapPoints (see the ORB_MEM_RECLAIM_BAD header note):
     // MapPoints enqueued at tick T sit in mPendingMapPointRelease, move to
