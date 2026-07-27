@@ -106,8 +106,8 @@ export ORB_BARO_GATE=6
 export ORB_BARO_FRAME_SIGMA=0.5
 [ -f "$DS_DIR/ref_mag.csv" ] && export ORB_MAG_CSV="$DS_DIR/ref_mag.csv"
 export ORB_MAG_SIGMA_DEG=10
-export ORB_DIVERGE_VMAX=30
-export ORB_DIVERGE_COUNT=4
+export ORB_DIVERGE_VMAX=${ORB_DIVERGE_VMAX:-30}
+export ORB_DIVERGE_COUNT=${ORB_DIVERGE_COUNT:-4}
 export ORB_STATS_CSV="$OUT_DIR/frame_stats.csv"
 
 PREFIX="hl_${FLIGHT}"
