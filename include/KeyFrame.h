@@ -226,6 +226,16 @@ public:
     static bool IsFlatBowEnabled();
     const FlatBowVector& GetBowFlat() const { return mBowVecFlat; }
 
+    // Task P3c (memory reduction). IsDropMonoDeadFieldsEnabled(): reads ORB_MEM_DROP_MONO_DEADFIELDS
+    // once (default OFF). When ON, a monocular(-inertial) KeyFrame's ctor releases mvKeys (distorted
+    // keypoints), mvuRight and mvDepth immediately after construction: every reader of them is either
+    // a stereo/fisheye-only branch (NLeft != -1 or mpCamera2 set) a mono frame never takes, or goes
+    // through GetKpURight()/GetKpDepth() (which synthesize -1.0f for an empty backing vector, matching
+    // the all-(-1) mono values) / UnprojectStereo() (guarded by depth > 0, unreachable in mono). Only
+    // applied when the frame provably carries no stereo data, so enabling the knob on a non-mono run
+    // is a safe no-op. Default OFF => the fields are kept exactly as stock.
+    static bool IsDropMonoDeadFieldsEnabled();
+
     // Covisibility graph functions
     void AddConnection(KeyFrame* pKF, const int &weight);
     void EraseConnection(KeyFrame* pKF);
@@ -480,13 +490,11 @@ private:
     std::vector<float> mvDepth; // negative value for monocular points
 
 public:
-    // Fault-in choke points (Task P3a). For now these simply return the still-present member --
-    // a pure indirection with zero behavior change (mvuRight/mvDepth are never dropped in P3a;
-    // that is P3c's job). GetKpURight()/GetKpDepth() return -1 for monocular points, matching the
-    // sign convention already used throughout the codebase. Bounds-checking these choke points
-    // against a possibly-released container is deliberately left to whichever later task
-    // actually starts releasing/paging mvuRight/mvDepth (see ReleaseBadPayload()'s comment: Task
-    // P3a investigated and rejected releasing them for now).
+    // Fault-in choke points (Task P3a). Pure indirection over the still-present members.
+    // Task P3c: GetKpURight()/GetKpDepth() now synthesize -1.0f when their backing vector is empty
+    // -- this is what makes ORB_MEM_DROP_MONO_DEADFIELDS lossless: a mono KeyFrame whose mvuRight/
+    // mvDepth were released reads back the same -1 sentinel it held while populated (mono points are
+    // all -1 by convention). Non-empty (stereo/RGBD, or the knob OFF) => the real value, unchanged.
     const std::vector<cv::KeyPoint>& GetKeysUn();
     const cv::Mat& GetDescriptorsMat();
     const DBoW2::FeatureVector& GetFeatVec();

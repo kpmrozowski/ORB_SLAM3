@@ -57,6 +57,31 @@ void AbortOnReleasedPayloadRead(const long unsigned int keyframe_id, const char*
     std::abort();
 }
 
+// Task P3c: true only for a KeyFrame source Frame that provably carries no stereo/RGBD data, i.e.
+// the monocular(-inertial) case where mvKeys/mvuRight/mvDepth are dead weight. Guards the drop so
+// enabling ORB_MEM_DROP_MONO_DEADFIELDS on a stereo/fisheye/RGBD run is a safe no-op:
+//  - Fisheye stereo (NLeft != -1) reads mvKeys/mvKeysRight in GetFeaturesInArea and the culling /
+//    observation-level octave lookups, so it must keep the fields.
+//  - Rectified-stereo / RGBD (NLeft == -1) carries real depth, surfaced as non-negative mvuRight
+//    (mvuRight[i] is the right-image x-coordinate, positive whenever mvDepth[i] > 0); any such entry
+//    means UnprojectStereo()/GetKpURight() have live data to read.
+// A pure monocular frame has NLeft == -1 and every mvuRight entry == -1, so the fields are dead.
+bool MonoFrameHasNoStereoData(const Frame& source_frame)
+{
+    if (source_frame.Nleft != -1)
+    {
+        return false;
+    }
+    for (const float right_coord : source_frame.mvuRight)
+    {
+        if (right_coord >= 0.0f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 long unsigned int KeyFrame::nNextId=0;
@@ -128,6 +153,20 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     SetPose(F.GetPose());
 
     mnOriginMapId = pMap->GetId();
+
+    // Task P3c (memory reduction): drop the mono-dead payload. The init list above copied mvKeys/
+    // mvuRight/mvDepth from the Frame exactly as stock (so the OFF path is byte-for-byte unchanged);
+    // here, under ORB_MEM_DROP_MONO_DEADFIELDS and only for a provably-mono source frame, we release
+    // those copies right away so no live monocular KeyFrame keeps them resident. Steady-state memory
+    // is identical to never allocating (each vector is emptied before the KeyFrame is used); the
+    // transient is one frame's worth, freed inside the ctor. See IsDropMonoDeadFieldsEnabled() and
+    // the accessor comments for the proof that these fields are dead on the mono path.
+    if (IsDropMonoDeadFieldsEnabled() && MonoFrameHasNoStereoData(F))
+    {
+        SwapWithEmpty(mvKeys);
+        SwapWithEmpty(mvuRight);
+        SwapWithEmpty(mvDepth);
+    }
 }
 
 // Task P3b: ORB_MEM_FLATBOW knob, read once (env is fixed for the process lifetime). Unset or 0 =>
@@ -135,6 +174,15 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
 bool KeyFrame::IsFlatBowEnabled()
 {
     static const char* const value = getenv("ORB_MEM_FLATBOW");
+    static const bool enabled = value != nullptr && atoi(value) != 0;
+    return enabled;
+}
+
+// Task P3c: ORB_MEM_DROP_MONO_DEADFIELDS knob, read once (env is fixed for the process lifetime).
+// Unset or 0 => keep mvKeys/mvuRight/mvDepth on every KeyFrame, byte-for-byte stock behaviour.
+bool KeyFrame::IsDropMonoDeadFieldsEnabled()
+{
+    static const char* const value = getenv("ORB_MEM_DROP_MONO_DEADFIELDS");
     static const bool enabled = value != nullptr && atoi(value) != 0;
     return enabled;
 }
@@ -886,11 +934,22 @@ const DBoW2::FeatureVector& KeyFrame::GetFeatVec()
 
 float KeyFrame::GetKpURight(const int keypoint_index) const
 {
+    // Task P3c: an empty backing vector means the mono-dead fields were dropped (or this is the
+    // serialization default ctor); synthesize the -1 monocular sentinel the vector would have held.
+    if (mvuRight.empty())
+    {
+        return -1.0f;
+    }
     return mvuRight[keypoint_index];
 }
 
 float KeyFrame::GetKpDepth(const int keypoint_index) const
 {
+    // Task P3c: see GetKpURight() -- an empty mvDepth reads back the -1 monocular sentinel.
+    if (mvDepth.empty())
+    {
+        return -1.0f;
+    }
     return mvDepth[keypoint_index];
 }
 
@@ -974,7 +1033,10 @@ bool KeyFrame::IsInImage(const float &x, const float &y) const
 
 bool KeyFrame::UnprojectStereo(int i, Eigen::Vector3f &x3D)
 {
-    const float z = mvDepth[i];
+    // Task P3c: a mono KeyFrame drops mvDepth/mvKeys (all -1); treat the empty vector as depth -1 so
+    // this returns false without indexing released storage. Mono never reaches here with z>0 anyway
+    // -- callers gate on bStereo = (!mpCamera2 && GetKpURight()>=0), which is false in mono.
+    const float z = mvDepth.empty() ? -1.0f : mvDepth[i];
     if(z>0)
     {
         const float u = mvKeys[i].pt.x;
