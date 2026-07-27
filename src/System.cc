@@ -1718,6 +1718,16 @@ float System::GetImageScale()
     return mpTracker->GetImageScale();
 }
 
+long long System::GetICRescueAttempts()
+{
+    return mpTracker->GetICRescueAttempts();
+}
+
+long long System::GetICRescueSuccesses()
+{
+    return mpTracker->GetICRescueSuccesses();
+}
+
 void System::SetPrefetch(const std::vector<std::string>& imagePaths,
                          const std::vector<double>& timestamps)
 {

@@ -25,6 +25,7 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <exception>
 
 #include<opencv2/core/core.hpp>
 
@@ -143,6 +144,44 @@ int main(int argc, char *argv[])
     // reports final coverage instead of silently forfeiting the flight.
     bool bDiverged = false;
     int proccIm=0;
+
+    // Finalize once, on EVERY exit path (normal end, divergence, mid-loop imread failure, uncaught
+    // exception): stop threads, save the partial trajectory, and print the coverage summary so a run
+    // never exits without a coverage number. `aborted` only selects the summary tag.
+    auto finalize_and_report = [&SLAM, bFileName, argv, argc, tot_images](const bool aborted)
+    {
+        SLAM.Shutdown();
+
+        const string f_file = bFileName ? ("f_" + string(argv[argc-1]) + ".txt") : string("CameraTrajectory.txt");
+        const string kf_file = bFileName ? ("kf_" + string(argv[argc-1]) + ".txt") : string("KeyFrameTrajectory.txt");
+        SLAM.SaveTrajectoryEuRoC(f_file);
+        SLAM.SaveKeyFrameTrajectoryEuRoC(kf_file);
+
+        long saved_poses = 0;
+        {
+            ifstream f_traj(f_file);
+            string traj_line;
+            while (getline(f_traj, traj_line))
+            {
+                if (!traj_line.empty())
+                    ++saved_poses;
+            }
+        }
+        const double coverage_pct = tot_images > 0 ? 100.0 * static_cast<double>(saved_poses) / tot_images : 0.0;
+        // Peak RSS across the whole run, in MB (VmHWM read directly from /proc/self/status).
+        const long peak_rss_mb = ORB_SLAM3::MemoryGovernor::ReadVmHwmKb() / 1024;
+        cout << "RUN SUMMARY: coverage " << saved_poses << "/" << tot_images << " poses ("
+             << std::fixed << std::setprecision(2) << coverage_pct << "%) "
+             << (aborted ? "[DIVERGED-ABORT]" : "[COMPLETE]")
+             << " peakRSS_mb=" << peak_rss_mb
+             << " rescue_attempts=" << SLAM.GetICRescueAttempts()
+             << " rescue_successes=" << SLAM.GetICRescueSuccesses() << endl;
+    };
+
+    // Guard the whole processing run so an uncaught exception still reports coverage. The loop below is
+    // kept flush (not re-indented) to avoid churning its timing / preprocessor blocks.
+    try
+    {
     for (seq = 0; seq<num_seq; seq++)
     {
 
@@ -161,6 +200,7 @@ int main(int argc, char *argv[])
             {
                 cerr << endl << "Failed to load image at: "
                      <<  vstrImageFilenames[seq][ni] << endl;
+                finalize_and_report(true);
                 return 1;
             }
 
@@ -255,35 +295,23 @@ int main(int argc, char *argv[])
             SLAM.ChangeDataset();
         }
     }
-
-    // Stop all threads
-    SLAM.Shutdown();
-
-    // Save camera trajectory
-    const string f_file = bFileName ? ("f_" + string(argv[argc-1]) + ".txt") : string("CameraTrajectory.txt");
-    const string kf_file = bFileName ? ("kf_" + string(argv[argc-1]) + ".txt") : string("KeyFrameTrajectory.txt");
-    SLAM.SaveTrajectoryEuRoC(f_file);
-    SLAM.SaveKeyFrameTrajectoryEuRoC(kf_file);
-
-    // Run summary: ALWAYS report final coverage (saved poses / total frames), whether the run completed
-    // or the divergence guard aborted it — so an abort never silently forfeits a flight without a number.
-    long saved_poses = 0;
-    {
-        ifstream f_traj(f_file);
-        string traj_line;
-        while (getline(f_traj, traj_line))
-        {
-            if (!traj_line.empty())
-                ++saved_poses;
-        }
     }
-    const double coverage_pct = tot_images > 0 ? 100.0 * static_cast<double>(saved_poses) / tot_images : 0.0;
-    // Peak RSS across the whole run, in MB (VmHWM read directly from /proc/self/status).
-    const long peak_rss_mb = ORB_SLAM3::MemoryGovernor::ReadVmHwmKb() / 1024;
-    cout << "RUN SUMMARY: coverage " << saved_poses << "/" << tot_images << " poses ("
-         << std::fixed << std::setprecision(2) << coverage_pct << "%) "
-         << (bDiverged ? "[DIVERGED-ABORT]" : "[COMPLETE]")
-         << " peakRSS_mb=" << peak_rss_mb << endl;
+    catch (const std::exception& e)
+    {
+        cerr << endl << "[FATAL] uncaught exception: " << e.what()
+             << " — reporting partial coverage before exit" << endl;
+        finalize_and_report(true);
+        return 1;
+    }
+    catch (...)
+    {
+        cerr << endl << "[FATAL] uncaught non-standard exception — reporting partial coverage before exit" << endl;
+        finalize_and_report(true);
+        return 1;
+    }
+
+    // Normal end (or divergence-abort): stop threads, save the trajectory, and report coverage.
+    finalize_and_report(bDiverged);
 
     return 0;
 }

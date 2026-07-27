@@ -198,6 +198,11 @@ public:
 
     float GetImageScale();
 
+    // Cascade RESCUE telemetry (ORB_IC_CASCADE_RESCUE) surfaced for the example run summary. Both
+    // return 0 when the rescue sub-flag is off.
+    long long GetICRescueAttempts();
+    long long GetICRescueSuccesses();
+
     // Env-gated (ORB_PREFETCH) multi-threaded ORB feature pre-extraction. No-op unless ORB_PREFETCH
     // is set. imagePaths/timestamps must be the exact order frames are fed to TrackMonocular.
     void SetPrefetch(const std::vector<std::string>& imagePaths, const std::vector<double>& timestamps);

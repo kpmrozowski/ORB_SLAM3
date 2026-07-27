@@ -194,6 +194,11 @@ public:
 
     bool mbWriteStats;
 
+    // Cascade RESCUE telemetry (ORB_IC_CASCADE_RESCUE), surfaced for the run summary. Cumulative
+    // attempts and successful re-locks; both stay 0 when the rescue sub-flag is off.
+    long long GetICRescueAttempts() const { return mnICRescueAttempts; }
+    long long GetICRescueSuccesses() const { return mnICRescueSuccesses; }
+
 #ifdef REGISTER_TIMES
     void LocalMapStats2File();
     void TrackStats2File();
@@ -296,6 +301,12 @@ protected:
     //ORB
     ORBextractor* mpORBextractorLeft, *mpORBextractorRight;
     ORBextractor* mpIniORBextractor;
+    // ORB_NF_TRACK (env, int > 0): reduced ORB budget used for TRACKING frames only (monocular
+    // paths). Initialization frames keep the stock 5x-nFeatures mpIniORBextractor budget, including
+    // after mid-run map resets. Unset/<=0 -> nullptr -> stock mpORBextractorLeft path (fail-open).
+    // Note: with ORB_PREFETCH the cache serves only mpORBextractorLeft (pointer-identity guard in
+    // Frame::ExtractORB), so an active override silently bypasses the cache -- correct, just unused.
+    ORBextractor* mpORBextractorTrack = nullptr;
 
     // Owns the feature prefetcher when ORB_PREFETCH is enabled (nullptr otherwise).
     std::unique_ptr<FeaturePrefetcher> mpFeaturePrefetcher;

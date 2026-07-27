@@ -670,6 +670,20 @@ void Tracking::newParameterLoader(Settings *settings) {
     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
         mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
+    // ORB_NF_TRACK: split feature budget -- reduced ORB extraction for TRACKING frames only, while
+    // initialization frames (incl. re-inits after map resets) keep the stock 5x-nFeatures budget
+    // above. Fail-open: unset/<=0 leaves mpORBextractorTrack null -> stock path byte-identical.
+    {
+        const char* const nfTrackEnv = std::getenv("ORB_NF_TRACK");
+        const int nfTrack = (nfTrackEnv != nullptr) ? std::atoi(nfTrackEnv) : 0;
+        if (nfTrack > 0 && (mSensor == System::MONOCULAR || mSensor == System::IMU_MONOCULAR))
+        {
+            mpORBextractorTrack = new ORBextractor(nfTrack, fScaleFactor, nLevels, fIniThFAST, fMinThFAST);
+            std::cout << "NF_TRACK: tracking-frame ORB budget override = " << nfTrack
+                      << " (init keeps 5x " << nFeatures << ")" << std::endl;
+        }
+    }
+
     //IMU parameters
     Sophus::SE3f Tbc = settings->Tbc();
     mInsertKFsLost = settings->insertKFsWhenLost();
@@ -1358,6 +1372,20 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
         mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
+    // ORB_NF_TRACK: split feature budget -- reduced ORB extraction for TRACKING frames only, while
+    // initialization frames (incl. re-inits after map resets) keep the stock 5x-nFeatures budget
+    // above. Fail-open: unset/<=0 leaves mpORBextractorTrack null -> stock path byte-identical.
+    {
+        const char* const nfTrackEnv = std::getenv("ORB_NF_TRACK");
+        const int nfTrack = (nfTrackEnv != nullptr) ? std::atoi(nfTrackEnv) : 0;
+        if (nfTrack > 0 && (mSensor == System::MONOCULAR || mSensor == System::IMU_MONOCULAR))
+        {
+            mpORBextractorTrack = new ORBextractor(nfTrack, fScaleFactor, nLevels, fIniThFAST, fMinThFAST);
+            std::cout << "NF_TRACK: tracking-frame ORB budget override = " << nfTrack
+                      << " (init keeps 5x " << nFeatures << ")" << std::endl;
+        }
+    }
+
     cout << endl << "ORB Extractor Parameters: " << endl;
     cout << "- Number of Features: " << nFeatures << endl;
     cout << "- Scale Levels: " << nLevels << endl;
@@ -1676,7 +1704,8 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
             mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
         else
-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+            // ORB_NF_TRACK: tracking frames may use the reduced-budget extractor (null -> stock).
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorTrack != nullptr ? mpORBextractorTrack : mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
     }
     else if(mSensor == System::IMU_MONOCULAR)
     {
@@ -1685,7 +1714,8 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
             mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
         }
         else
-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+            // ORB_NF_TRACK: tracking frames may use the reduced-budget extractor (null -> stock).
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorTrack != nullptr ? mpORBextractorTrack : mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
     }
 
     if (mState==NO_IMAGES_YET)
@@ -1703,7 +1733,7 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 
     // Flush this frame's cascade telemetry (one CASC row) now that Track() has resolved the final state —
     // so a rescue attempt is logged as success ('R') / attempt ('r') correctly. Count rescue successes
-    // regardless of debug logging (the run summary reports them).
+    // regardless of debug logging (the example's RUN SUMMARY line reports them via System::GetICRescue*).
     if (mICCascade.computed)
     {
         if ((mICCascade.consumed & 4) && mState == OK)
@@ -2110,10 +2140,12 @@ void Tracking::Track()
 
                         // ORB_IC_CASCADE_RESCUE: before conceding a pre-IMU-init recently-lost frame, seed a
                         // pose from the last frame via the H_best decomposition so the TrackLocalMap below can
-                        // re-lock. Fail-open: on failure bOK stays false and the stock lost path resumes.
+                        // re-lock. GATED to the IC/gyro-family winner (winner=='i') — same exactness
+                        // precondition as PRIOR (skip the lazy-ORB winner). Fail-open: on any miss bOK stays
+                        // false and the stock lost path resumes.
                         if (!bOK && ICCascadeEnabled() && ICCascadeRescueEnabled() && !pCurrentMap->isImuInitialized()
                             && (mSensor == System::IMU_MONOCULAR || mSensor == System::MONOCULAR) && mLastFrame.isSet()
-                            && ComputeICCascade(false) && mICCascade.has_plane)
+                            && ComputeICCascade(false) && mICCascade.has_plane && mICCascade.winner == 'i')
                         {
                             const ICPoseDelta delta = ICDecomposeHomographyToPose(
                                 mICCascade.h_best, mICCascade.intrinsic, mICCascade.rotation_c2_c1,
@@ -4039,11 +4071,14 @@ bool Tracking::TrackWithMotionModel()
     const bool cascadeReady = ICCascadeEnabled() && !mpAtlas->isImuInitialized() && ComputeICCascade(false);
 
     // ORB_IC_CASCADE_PRIOR: replace the stale constant-velocity prediction with an H_best-decomposed pose.
-    // Rotation comes from gyro+IC(+ORB) (H_best); translation MAGNITUDE stays map-scale (from mVelocity,
-    // the only metric-consistent magnitude pre-IMU-init) while its DIRECTION is taken from the homography
-    // decomposition when H_best carries a real translation (else the velocity translation is kept).
+    // GATED to the IC/gyro-family winner (winner=='i'): the decomposition is exact only when H_best's
+    // rotation IS the gyro R21 (see ICDecomposeHomographyToPose). When the lazy-ORB homography wins the ECC
+    // vote we SKIP the prior (fail-open to the stock velocity prediction) rather than leak its rotation
+    // residual into the recovered translation. Rotation then comes from gyro+IC (H_best); translation
+    // MAGNITUDE stays map-scale (from mVelocity, the only metric-consistent magnitude pre-IMU-init) while
+    // its DIRECTION is taken from the homography decomposition when H_best carries a real translation.
     bool priorApplied = false;
-    if (cascadeReady && ICCascadePriorEnabled() && mICCascade.has_plane)
+    if (cascadeReady && ICCascadePriorEnabled() && mICCascade.has_plane && mICCascade.winner == 'i')
     {
         const ICPoseDelta delta = ICDecomposeHomographyToPose(mICCascade.h_best, mICCascade.intrinsic,
                                                               mICCascade.rotation_c2_c1, mICCascade.plane_normal_c1);
