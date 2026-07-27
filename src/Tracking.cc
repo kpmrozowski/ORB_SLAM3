@@ -4842,6 +4842,25 @@ bool Tracking::Relocalization()
         return false;
     }
 
+    // Task P3d: async page-in the relocalization candidates (and covisibles) before the ORB
+    // matching below faults them in synchronously. No-op unless ORB_MEM_BUDGET_MB enabled.
+    if (MemoryGovernor::SpillActive())
+    {
+        MemoryGovernor& governor = MemoryGovernor::Instance();
+        for (KeyFrame* const candidate : vpCandidateKFs)
+        {
+            if (candidate == nullptr)
+            {
+                continue;
+            }
+            governor.Prefetch(candidate);
+            for (KeyFrame* const covisible : candidate->GetBestCovisibilityKeyFrames(10))
+            {
+                governor.Prefetch(covisible);
+            }
+        }
+    }
+
     const int nKFs = vpCandidateKFs.size();
 
     // We perform first an ORB matching with each candidate

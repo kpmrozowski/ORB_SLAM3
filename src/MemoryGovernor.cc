@@ -1,8 +1,10 @@
 #include "MemoryGovernor.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -15,6 +17,7 @@
 #include <KeyFrame.h>
 #include <Map.h>
 #include <MapPoint.h>
+#include <PayloadSpill.h>
 
 namespace ORB_SLAM3
 {
@@ -53,6 +56,46 @@ bool WarnIfReclaimRequestedWithoutDeterministic(const bool reclaim_requested,
                       "ignoring -- reclaim stays inert.\n");
     }
     return reclaim_requested && deterministic_mode;
+}
+
+// Task P3d: same one-shot warning for the spill budget knob.
+bool WarnIfBudgetRequestedWithoutDeterministic(const bool budget_requested,
+                                               const bool deterministic_mode)
+{
+    if (budget_requested && !deterministic_mode)
+    {
+        std::fprintf(stderr,
+                      "ORB_MEM_BUDGET_MB>0 requires ORB_DETERMINISTIC=1 (deterministic mode); "
+                      "ignoring -- payload spill stays inert.\n");
+    }
+    return budget_requested && deterministic_mode;
+}
+
+// Resolve the spill file path: ORB_MEM_SPILL, else <cwd>/orbmem_spill.bin.
+std::string ResolveSpillPath()
+{
+    const char* const configured = std::getenv("ORB_MEM_SPILL");
+    if (configured != nullptr && configured[0] != '\0')
+    {
+        return std::string(configured);
+    }
+    char cwd_buffer[4096];
+    if (::getcwd(cwd_buffer, sizeof(cwd_buffer)) != nullptr)
+    {
+        return std::string(cwd_buffer) + "/orbmem_spill.bin";
+    }
+    return std::string("orbmem_spill.bin");
+}
+
+// Eviction ordering: coldest (lowest LRU tick) first, ties broken by ascending KeyFrame id so the
+// oldest map region is paged out before newer covisible neighbours. No captures (global style).
+bool EvictOrderLess(KeyFrame* const first, KeyFrame* const second)
+{
+    if (first->mSpillLastUseTick != second->mSpillLastUseTick)
+    {
+        return first->mSpillLastUseTick < second->mSpillLastUseTick;
+    }
+    return first->mnId < second->mnId;
 }
 
 // Writes the full buffer with a raw fd, looping over short writes (POSIX write() may write
@@ -157,7 +200,7 @@ void MemoryGovernor::AppendStats(const double timestamp_seconds)
         static const char* const header =
             "timestamp,vmrss_mb,vmhwm_mb,mallinfo_inuse_mb,mallinfo_free_mb,"
             "kf_created,kf_live,kf_hot,kf_cold,kf_shell,mp_created,mp_live,"
-            "maps_stored,spill_mb,faultins_total\n";
+            "maps_stored,spill_mb,faultins_total,io_read_mb,io_write_mb,io_throttle_ms\n";
         WriteAll(stats_fd, header, std::strlen(header));
     }
 
@@ -178,6 +221,9 @@ void MemoryGovernor::AppendStats(const double timestamp_seconds)
     long kf_live = 0;
     long mp_live = 0;
     long maps_stored = 0;
+    long kf_hot = 0;   // Task P3d: KeyFrames whose spillable payload is resident in RAM
+    long kf_cold = 0;  // Task P3d: KeyFrames whose payload has been evicted to the spill file
+    const bool spill_active = SpillActive();
     if (mpAtlas != nullptr)
     {
         for (Map* const current_map : mpAtlas->GetAllMaps())
@@ -186,32 +232,61 @@ void MemoryGovernor::AppendStats(const double timestamp_seconds)
             {
                 continue;
             }
-            kf_live += static_cast<long>(current_map->GetAllKeyFrames().size());
+            const std::vector<KeyFrame*> map_key_frames = current_map->GetAllKeyFrames();
+            kf_live += static_cast<long>(map_key_frames.size());
             mp_live += static_cast<long>(current_map->GetAllMapPoints().size());
             if (!current_map->IsInUse())
             {
                 ++maps_stored;
             }
+            if (spill_active)
+            {
+                for (KeyFrame* const key_frame : map_key_frames)
+                {
+                    if (key_frame == nullptr)
+                    {
+                        continue;
+                    }
+                    const std::uint8_t state =
+                        key_frame->mSpillResidency.load(std::memory_order_acquire);
+                    if (spill::PayloadPresent(state) || state == spill::kLoading)
+                    {
+                        ++kf_hot;
+                    }
+                    else
+                    {
+                        ++kf_cold;
+                    }
+                }
+            }
         }
     }
 
-    // Reserved for later phases (P3+ eviction/spill); always 0 here. Kept as named constants
-    // (rather than inline literals) so it is obvious at the call site which columns are stubs.
-    // kf_shell is live as of Task P1: mKfShellReleased is bumped once per KeyFrame whose payload
-    // was actually released by KeyFrame::ReleaseBadPayload() (see IncrementKfShellReleased()).
-    const long kf_hot_stub = 0;
-    const long kf_cold_stub = 0;
+    // kf_shell is live as of Task P1; spill_mb/faultins/io_* are live as of Task P3d (0 when the
+    // spill worker was never started, i.e. the budget is unset).
     const long kf_shell = mKfShellReleased.load(std::memory_order_relaxed);
-    const long spill_mb_stub = 0;
-    const long faultins_total_stub = 0;
+    long spill_mb = 0;
+    long faultins_total = 0;
+    double io_read_mb = 0.0;
+    double io_write_mb = 0.0;
+    double io_throttle_ms = 0.0;
+    if (mSpillWorker != nullptr)
+    {
+        spill_mb = static_cast<long>(mSpillWorker->SpillBytes() / (1024 * 1024));
+        faultins_total = mSpillWorker->SyncFaultins();
+        io_read_mb = mSpillWorker->IoReadMb();
+        io_write_mb = mSpillWorker->IoWriteMb();
+        io_throttle_ms = mSpillWorker->IoThrottleMs();
+    }
 
-    char row[512];
+    char row[640];
     const int row_length = std::snprintf(
-        row, sizeof(row), "%.6f,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
+        row, sizeof(row),
+        "%.6f,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%.3f,%.3f,%.3f\n",
         timestamp_seconds, ReadVmRssKb() / 1024, ReadVmHwmKb() / 1024, mallinfo_inuse_mb,
-        mallinfo_free_mb, static_cast<long>(KeyFrame::nNextId), kf_live, kf_hot_stub, kf_cold_stub,
-        kf_shell, static_cast<long>(MapPoint::nNextId), mp_live, maps_stored, spill_mb_stub,
-        faultins_total_stub);
+        mallinfo_free_mb, static_cast<long>(KeyFrame::nNextId), kf_live, kf_hot, kf_cold,
+        kf_shell, static_cast<long>(MapPoint::nNextId), mp_live, maps_stored, spill_mb,
+        faultins_total, io_read_mb, io_write_mb, io_throttle_ms);
     if (row_length > 0 && static_cast<std::size_t>(row_length) < sizeof(row))
     {
         WriteAll(stats_fd, row, static_cast<std::size_t>(row_length));
@@ -220,34 +295,181 @@ void MemoryGovernor::AppendStats(const double timestamp_seconds)
 
 void MemoryGovernor::Tick()
 {
-    // Zero per-tick cost when reclaim is disabled: one static-bool check (via
-    // ReclaimBadPayloadEnabled()'s own cached statics), nothing else touched.
-    if (!ReclaimBadPayloadEnabled())
+    // Task P1 reclaim path (independent of the P3d spill path below): zero per-tick cost when
+    // disabled -- one static-bool check via ReclaimBadPayloadEnabled()'s cached statics.
+    if (ReclaimBadPayloadEnabled())
+    {
+        // Two-phase deferred release (see MemoryGovernor.h): free everything enqueued BEFORE the
+        // previous tick (mReadyMapPointRelease), then rotate this tick's enqueues
+        // (mPendingMapPointRelease) into mReadyMapPointRelease for the next tick. clear() retains
+        // vector capacity, so after the reserve() in DeferMapPointRelease() this path performs no
+        // heap allocation in steady state. KeyFrame release is no longer queued here (Task
+        // P1-fix): it runs inline from KeyFrame::SetBadFlag() instead — see MemoryGovernor.h.
+        for (MapPoint* const map_point : mReadyMapPointRelease)
+        {
+            map_point->ReleaseBadDescriptor();
+        }
+        mReadyMapPointRelease.clear();
+        mReadyMapPointRelease.swap(mPendingMapPointRelease);
+
+        static const int trim_every_ticks = 100;
+        static long tick_counter = 0;
+        ++tick_counter;
+        if (tick_counter % trim_every_ticks == 0)
+        {
+#if defined(__GLIBC__)
+            ::malloc_trim(0);
+#endif
+        }
+    }
+
+    // Task P3d cold-KF eviction sweep. Runs AFTER the LocalMapping/LoopClosing spins (System.cc),
+    // so we never evict what this round's loop/reloc/merge detection just touched. Zero per-tick
+    // cost when the budget is unset (one static-bool check in SpillActive()).
+    if (SpillActive())
+    {
+        EvictionSweep();
+    }
+}
+
+bool MemoryGovernor::SpillActive()
+{
+    static const bool deterministic_mode = MemEnvSet("ORB_DETERMINISTIC");
+    static const bool budget_requested = MemEnvInt("ORB_MEM_BUDGET_MB", 0) > 0;
+    static const bool active =
+        WarnIfBudgetRequestedWithoutDeterministic(budget_requested, deterministic_mode);
+    return active;
+}
+
+void MemoryGovernor::EnsureSpillWorker()
+{
+    if (mSpillWorker != nullptr || mSpillDisabled)
+    {
+        return;
+    }
+    static const int io_mbps = MemEnvInt("ORB_MEM_IO_MBPS", 10);
+    mSpillWorker.reset(new SpillWorker(ResolveSpillPath(), static_cast<double>(io_mbps)));
+    if (!mSpillWorker->Ok())
+    {
+        std::fprintf(stderr, "MemoryGovernor: could not open spill file; payload spill disabled.\n");
+        mSpillDisabled = true;
+        mSpillWorker.reset();
+    }
+}
+
+void MemoryGovernor::EvictionSweep()
+{
+    if (mpAtlas == nullptr)
+    {
+        return;
+    }
+    EnsureSpillWorker();
+    if (mSpillWorker == nullptr)
     {
         return;
     }
 
-    // Two-phase deferred release (see MemoryGovernor.h): free everything enqueued BEFORE the
-    // previous tick (mReadyMapPointRelease), then rotate this tick's enqueues
-    // (mPendingMapPointRelease) into mReadyMapPointRelease for the next tick. clear() retains
-    // vector capacity, so after the reserve() in DeferMapPointRelease() this path performs no
-    // heap allocation in steady state. KeyFrame release is no longer queued here (Task P1-fix):
-    // it runs inline from KeyFrame::SetBadFlag() instead — see MemoryGovernor.h.
-    for (MapPoint* const map_point : mReadyMapPointRelease)
-    {
-        map_point->ReleaseBadDescriptor();
-    }
-    mReadyMapPointRelease.clear();
-    mReadyMapPointRelease.swap(mPendingMapPointRelease);
+    const long current_tick = mSpillTick.fetch_add(1, std::memory_order_relaxed) + 1;
 
-    static const int trim_every_ticks = 100;
-    static long tick_counter = 0;
-    ++tick_counter;
-    if (tick_counter % trim_every_ticks == 0)
+    Map* const current_map = mpAtlas->GetCurrentMap();
+    if (current_map == nullptr)
     {
-#if defined(__GLIBC__)
-        ::malloc_trim(0);
-#endif
+        return;
+    }
+
+    // Protect set = the last W=60 created KeyFrames (a cheap proxy for the tracking local window /
+    // current covisibles: those are the most-recently-created ids). Eviction correctness does NOT
+    // depend on the protect set -- any evicted KeyFrame faults back to identical bytes on the next
+    // read -- it only bounds I/O churn on the active working set.
+    static const int hot_target = MemEnvInt("ORB_MEM_HOT_KFS", 150);
+    static const long protect_window = 60;
+    const long newest_id = static_cast<long>(KeyFrame::nNextId);
+
+    long hot_count = 0;
+    mEvictCandidatesScratch.clear();
+    for (KeyFrame* const key_frame : current_map->GetAllKeyFrames())
+    {
+        if (key_frame == nullptr || !key_frame->SpillEligible())
+        {
+            continue;
+        }
+        const std::uint8_t state = key_frame->mSpillResidency.load(std::memory_order_acquire);
+        const bool payload_in_ram = spill::PayloadPresent(state) || state == spill::kLoading;
+        if (!payload_in_ram)
+        {
+            continue;  // already evicted / being loaded -- not occupying a hot slot to reclaim
+        }
+        ++hot_count;
+        if (static_cast<long>(key_frame->mnId) >= newest_id - protect_window)
+        {
+            continue;  // protected recent window
+        }
+        mEvictCandidatesScratch.push_back(key_frame);
+    }
+
+    if (hot_count <= hot_target)
+    {
+        return;
+    }
+    const long need_to_evict = hot_count - hot_target;
+
+    std::sort(mEvictCandidatesScratch.begin(), mEvictCandidatesScratch.end(), EvictOrderLess);
+
+    long freed = 0;
+    long enqueued = 0;
+    for (KeyFrame* const key_frame : mEvictCandidatesScratch)
+    {
+        const std::uint8_t state = key_frame->mSpillResidency.load(std::memory_order_acquire);
+        if (freed < need_to_evict && state == spill::kPersistedResident)
+        {
+            // Durable on disk: free the RAM copy now (the only free point, main thread at tick).
+            std::uint8_t expected = spill::kPersistedResident;
+            if (key_frame->mSpillResidency.compare_exchange_strong(expected, spill::kEvicted,
+                                                                   std::memory_order_acq_rel))
+            {
+                key_frame->SpillFree();
+                ++freed;
+            }
+        }
+        else if (enqueued < need_to_evict && state == spill::kResident)
+        {
+            // Not yet spilled: write-behind now, evict at a subsequent tick once durable.
+            mSpillWorker->EnqueueWrite(key_frame);
+            ++enqueued;
+        }
+    }
+}
+
+void MemoryGovernor::FaultIn(KeyFrame* const key_frame)
+{
+    EnsureSpillWorker();
+    if (mSpillWorker == nullptr)
+    {
+        return;
+    }
+    mSpillWorker->WaitResident(key_frame);
+    key_frame->mSpillLastUseTick = mSpillTick.load(std::memory_order_relaxed);
+}
+
+void MemoryGovernor::Prefetch(KeyFrame* const key_frame)
+{
+    if (!SpillActive() || key_frame == nullptr)
+    {
+        return;
+    }
+    EnsureSpillWorker();
+    if (mSpillWorker == nullptr)
+    {
+        return;
+    }
+    mSpillWorker->EnqueuePrefetch(key_frame);
+}
+
+void MemoryGovernor::ShutdownSpill()
+{
+    if (mSpillWorker != nullptr)
+    {
+        mSpillWorker->Shutdown();
     }
 }
 

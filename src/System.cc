@@ -784,6 +784,11 @@ void System::Shutdown()
 
     cout << "Shutdown" << endl;
 
+    // Task P3d: stop and join the background SpillWorker before tearing down (trajectory saving
+    // reads only resident poses/mTcp, never spilled payload, so no fault-in can follow). Idempotent
+    // and a no-op when the payload-spill feature was never enabled.
+    MemoryGovernor::Instance().ShutdownSpill();
+
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
     /*if(mpViewer)

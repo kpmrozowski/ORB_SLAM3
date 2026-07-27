@@ -22,6 +22,7 @@
 
 #include "DeterministicOrder.h"
 #include "FlatBowVector.h"
+#include "PayloadSpill.h"
 #include "MapPoint.h"
 #include "Thirdparty/DBoW2/DBoW2/BowVector.h"
 #include "Thirdparty/DBoW2/DBoW2/FeatureVector.h"
@@ -34,6 +35,8 @@
 #include "GeometricCamera.h"
 #include "SerializationUtils.h"
 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 
 #include <boost/serialization/base_object.hpp>
@@ -500,6 +503,27 @@ public:
     const DBoW2::FeatureVector& GetFeatVec();
     float GetKpURight(const int keypoint_index) const;
     float GetKpDepth(const int keypoint_index) const;
+
+    // Task P3d (cold-KF payload spill). Per-KF residency state (see PayloadSpill.h). Default
+    // kResident; only ever leaves that when ORB_MEM_BUDGET_MB>0 enables the governor. Public
+    // because the SpillWorker reads/writes it with release/acquire ordering from its own thread.
+    std::atomic<std::uint8_t> mSpillResidency{spill::kResident};
+    // Monotonic "last touched" tick for the governor's LRU eviction; written on every fault-in.
+    long mSpillLastUseTick = 0;
+
+    // Fault-in choke point: if the payload has been evicted, block (on this caller) until it is
+    // resident again. Cheap no-op (one atomic load) when the feature is off or the payload is hot.
+    // const because it restores identical bytes -- observable const state is unchanged.
+    void EnsureResident() const;
+
+    // SpillWorker/governor support (Task P3d). SpillSerialize()/SpillInstall() run on the worker
+    // thread under mMutexFeatures; SpillFree() runs on the main thread at the governor tick.
+    bool SpillSerialize(std::vector<std::uint8_t>& out_body);
+    void SpillInstall(const std::vector<std::uint8_t>& body);
+    void SpillFree();
+    int SpillFeatureCount() const { return N; }
+    // Eligible for spill/eviction: alive, payload not P1-released, real feature payload present.
+    bool SpillEligible();
 
     // The following variables need to be accessed trough a mutex to be thread safe.
 protected:

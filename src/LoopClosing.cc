@@ -32,10 +32,44 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <vector>
 
+#include <MemoryGovernor.h>
 
 namespace ORB_SLAM3
 {
+
+namespace
+{
+
+// Task P3d: read-ahead page-in for loop/merge place-recognition. Candidate selection reads only
+// the always-resident flat BoW; once the candidate list exists, queue each candidate and its top
+// covisibles (nNumCovisibles=10) for background load so the SpillWorker faults them in before the
+// geometric matching in DetectCommonRegionsFromBoW touches their descriptors/keypoints. Pure
+// latency hiding: the synchronous WaitResident backstop still guarantees correctness, and the
+// restored bytes are identical regardless of when the load happens.
+void PrefetchSpillCandidates(const std::vector<KeyFrame*>& candidates)
+{
+    if (!MemoryGovernor::SpillActive())
+    {
+        return;
+    }
+    MemoryGovernor& governor = MemoryGovernor::Instance();
+    for (KeyFrame* const candidate : candidates)
+    {
+        if (candidate == nullptr)
+        {
+            continue;
+        }
+        governor.Prefetch(candidate);
+        for (KeyFrame* const covisible : candidate->GetBestCovisibilityKeyFrames(10))
+        {
+            governor.Prefetch(covisible);
+        }
+    }
+}
+
+}  // namespace
 
 // Place-recognition sensitivity knobs (env-overridable; defaults preserve stock ORB-SLAM3).
 //   ORB_PR_NCAND        BoW candidates fetched per keyframe (stock 3)
@@ -564,6 +598,10 @@ bool LoopClosing::NewDetectCommonRegions()
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartEstSim3_2 = std::chrono::steady_clock::now();
 #endif
+    // Task P3d: async page-in the just-selected candidates before geometric matching below.
+    PrefetchSpillCandidates(vpLoopBowCand);
+    PrefetchSpillCandidates(vpMergeBowCand);
+
     // Place-recognition cascade debug (env ORB_PR_DEBUG): where do candidates die?
     static const bool prDebug = getenv("ORB_PR_DEBUG") != nullptr;
     if (prDebug && (!vpLoopBowCand.empty() || !vpMergeBowCand.empty()))

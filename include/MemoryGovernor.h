@@ -98,6 +98,7 @@
 #define MEMORYGOVERNOR_H
 
 #include <atomic>
+#include <memory>
 #include <vector>
 
 namespace ORB_SLAM3
@@ -105,6 +106,8 @@ namespace ORB_SLAM3
 
 class Atlas;
 class MapPoint;
+class KeyFrame;
+class SpillWorker;
 
 class MemoryGovernor
 {
@@ -176,11 +179,45 @@ public:
     // single deterministic-mode thread (ReclaimBadPayloadEnabled() ensures that).
     static void IncrementKfShellReleased();
 
+    // Task P3d — cold-KF payload spill + eviction (ORB_MEM_BUDGET_MB).
+    //
+    // True iff ORB_MEM_BUDGET_MB>0 AND ORB_DETERMINISTIC is active. Master enable for the whole
+    // spill subsystem (worker thread, eviction sweep, fault-in). Requesting it in threaded mode
+    // prints one warning and stays inert (frees can only be made race-free at the single
+    // deterministic tick — see plan decision 5). ORB_MEM_BUDGET_MB=0/unset => fully inert = stock.
+    static bool SpillActive();
+
+    // Fault-in choke, called from KeyFrame::EnsureResident() ONLY on a cold miss (the hot-path
+    // acquire-load already returned). Blocks THIS caller until the payload is resident; lazily
+    // starts the SpillWorker. Updates the KeyFrame's LRU tick.
+    void FaultIn(KeyFrame* const key_frame);
+
+    // Read-ahead hook: queue a loop/reloc/merge candidate (and its covisibles) for background
+    // page-in after BoW candidate selection, before geometric matching touches its payload. No-op
+    // unless SpillActive() and the KeyFrame is currently evicted.
+    void Prefetch(KeyFrame* const key_frame);
+
+    // Join the background SpillWorker. Called from System::Shutdown(); idempotent.
+    void ShutdownSpill();
+
+    // Current governor spill tick (monotonic, bumped once per eviction sweep). Used as the LRU
+    // stamp written into KeyFrame::mSpillLastUseTick on fault-in.
+    long CurrentSpillTick() const { return mSpillTick.load(std::memory_order_relaxed); }
+
 private:
     MemoryGovernor() = default;
 
+    // Task P3d helpers (all main-thread-only, called from Tick()/FaultIn()).
+    void EnsureSpillWorker();
+    void EvictionSweep();
+
     Atlas* mpAtlas = nullptr;
     std::atomic<long> mKfShellReleased{0};
+
+    std::unique_ptr<SpillWorker> mSpillWorker;
+    bool mSpillDisabled = false;                 // set if the spill file could not be opened
+    std::atomic<long> mSpillTick{0};
+    std::vector<KeyFrame*> mEvictCandidatesScratch;  // reused across ticks (no per-tick alloc)
 
     // Two-phase deferred-release queue for MapPoints (see the ORB_MEM_RECLAIM_BAD header note):
     // MapPoints enqueued at tick T sit in mPendingMapPointRelease, move to

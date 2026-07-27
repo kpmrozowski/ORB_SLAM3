@@ -95,6 +95,7 @@ src/GpsOverlay.cc
 src/MemoryGovernor.cc
 src/CompactVocabulary.cc
 src/FlatBowVector.cc
+src/PayloadSpill.cc
 include/System.h
 include/Tracking.h
 include/LocalMapping.h
@@ -129,7 +130,9 @@ include/ICAlign.h
 include/ICSeed.h
 include/GpsOverlay.h
 include/MemoryGovernor.h
-include/CompactVocabulary.h)
+include/CompactVocabulary.h
+include/FlatBowVector.h
+include/PayloadSpill.h)
 
 add_subdirectory(Thirdparty/g2o)
 
@@ -292,6 +295,13 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Vocabulary)
 add_executable(vocabulary_converter
         Examples/Vocabulary/vocabulary_converter.cc)
 target_link_libraries(vocabulary_converter ${PROJECT_NAME})
+
+# Unit tests (Task P3d: PayloadSpill record roundtrip). assert-main style, no gtest dependency.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Tests)
+
+add_executable(payload_spill_roundtrip
+        Examples/Tests/payload_spill_roundtrip.cc)
+target_link_libraries(payload_spill_roundtrip ${PROJECT_NAME})
 
 #Old examples
 

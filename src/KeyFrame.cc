@@ -855,6 +855,18 @@ void KeyFrame::ReleaseBadPayload()
         return;
     }
 
+    // Task P3d: when the spill governor is active a background SpillWorker may be serializing this
+    // KeyFrame's mDescriptorsData/mFeatVecData/mGrid (under mMutexFeatures). Take that same mutex
+    // around the frees below so a bad-KF release can never race the worker's read. Deferred-lock so
+    // the reclaim-only (budget-off) path is byte-for-byte unchanged from Task P1. mvKeysUnData is
+    // still KEPT here (P1) -- an evicted-then-bad KeyFrame keeps a valid on-disk record, so a stale
+    // observation reader faults its keysUn back to identical bytes via the accessor.
+    std::unique_lock<std::mutex> features_lock(mMutexFeatures, std::defer_lock);
+    if (MemoryGovernor::SpillActive())
+    {
+        features_lock.lock();
+    }
+
     // Partial release (Task P1). KEPT deliberately -- mvKeysUnData, mvuRight, mvpMapPoints:
     // stock ORB-SLAM3 leaves STALE OBSERVATIONS behind (CreateNewMapPoints can overwrite a
     // neighbour-KF slot via AddMapPoint without erasing the overwritten MapPoint's observation
@@ -919,16 +931,19 @@ void KeyFrame::ReleaseBadPayload()
 // underlying vectors) is deliberately left to that later task, not added speculatively here.
 const std::vector<cv::KeyPoint>& KeyFrame::GetKeysUn()
 {
+    EnsureResident();
     return mvKeysUnData;
 }
 
 const cv::Mat& KeyFrame::GetDescriptorsMat()
 {
+    EnsureResident();
     return mDescriptorsData;
 }
 
 const DBoW2::FeatureVector& KeyFrame::GetFeatVec()
 {
+    EnsureResident();
     return mFeatVecData;
 }
 
@@ -951,6 +966,110 @@ float KeyFrame::GetKpDepth(const int keypoint_index) const
         return -1.0f;
     }
     return mvDepth[keypoint_index];
+}
+
+// Task P3d: fault-in choke point. One acquire-load fast path when the payload is hot (this is the
+// entire cost when ORB_MEM_BUDGET_MB is unset -- residency never leaves kResident). On a cold miss
+// the governor's SpillWorker restores identical bytes (const_cast is safe: the observable const
+// state -- the payload values -- is unchanged, only its residency in RAM).
+void KeyFrame::EnsureResident() const
+{
+    const std::uint8_t state = mSpillResidency.load(std::memory_order_acquire);
+    if (spill::PayloadPresent(state))
+    {
+        return;
+    }
+    MemoryGovernor::Instance().FaultIn(const_cast<KeyFrame*>(this));
+}
+
+// Worker thread: read-only copy of the immutable payload into a spill body, under mMutexFeatures so
+// it cannot race a concurrent ReleaseBadPayload() free. Returns false (skip write) if the KeyFrame
+// went bad / released its payload before we serialized it (there is then no valid record to write;
+// its kept keysUn stays resident).
+bool KeyFrame::SpillSerialize(std::vector<std::uint8_t>& out_body)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if (mbPayloadReleased || mDescriptorsData.empty())
+    {
+        return false;
+    }
+    spill::SerializePayloadBody(mDescriptorsData, mvKeysUnData, mFeatVecData, out_body);
+    return true;
+}
+
+// Worker thread: install a faulted-in payload and rebuild the (never-spilled) grid, under
+// mMutexFeatures. Idempotent -- a concurrent WaitResident caller may have already installed it.
+void KeyFrame::SpillInstall(const std::vector<std::uint8_t>& body)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if (!mDescriptorsData.empty())
+    {
+        return;
+    }
+    cv::Mat descriptors;
+    std::vector<cv::KeyPoint> keys_undistorted;
+    DBoW2::FeatureVector feature_vector;
+    if (!spill::DeserializePayloadBody(body.data(), body.size(), N, descriptors, keys_undistorted,
+                                       feature_vector))
+    {
+        std::fprintf(stderr, "KeyFrame %lu: corrupt spill payload on fault-in\n",
+                     static_cast<unsigned long>(mnId));
+        std::abort();
+    }
+    mDescriptorsData = descriptors;
+    mvKeysUnData = std::move(keys_undistorted);
+    mFeatVecData = std::move(feature_vector);
+
+    // Rebuild mGrid exactly as Frame::AssignFeaturesToGrid did for the monocular source frame
+    // (ascending i over mvKeysUnData, identical PosInGrid rounding) -> byte-identical grid, so
+    // GetFeaturesInArea returns the same indices in the same order it did before eviction.
+    const int reserve_per_cell = 0.5f * N / (FRAME_GRID_COLS * FRAME_GRID_ROWS);
+    mGrid.resize(mnGridCols);
+    for (int cell_x = 0; cell_x < mnGridCols; ++cell_x)
+    {
+        mGrid[cell_x].assign(mnGridRows, std::vector<std::size_t>());
+        for (int cell_y = 0; cell_y < mnGridRows; ++cell_y)
+        {
+            mGrid[cell_x][cell_y].reserve(reserve_per_cell);
+        }
+    }
+    for (int feature_index = 0; feature_index < N; ++feature_index)
+    {
+        const cv::KeyPoint& keypoint = mvKeysUnData[feature_index];
+        const int pos_x = round((keypoint.pt.x - mnMinX) * mfGridElementWidthInv);
+        const int pos_y = round((keypoint.pt.y - mnMinY) * mfGridElementHeightInv);
+        if (pos_x >= 0 && pos_x < FRAME_GRID_COLS && pos_y >= 0 && pos_y < FRAME_GRID_ROWS)
+        {
+            mGrid[pos_x][pos_y].push_back(feature_index);
+        }
+    }
+}
+
+// Main thread, at the deterministic governor tick only: free the spilled payload + drop the grid.
+// Never called for a KeyFrame in a worker-owned state (kWriteQueued/kLoading), so it cannot race
+// the worker; guarded by mMutexFeatures for the store-store publication of the emptied fields.
+void KeyFrame::SpillFree()
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    SwapWithEmpty(mvKeysUnData);
+    SwapWithEmpty(mFeatVecData);
+    SwapWithEmpty(mGrid);
+    mDescriptorsData.release();
+}
+
+// Eligible for spill/eviction: has a real feature payload, is alive and has not P1-released.
+bool KeyFrame::SpillEligible()
+{
+    if (N <= 0)
+    {
+        return false;
+    }
+    if (isBad())
+    {
+        return false;
+    }
+    unique_lock<mutex> lock(mMutexFeatures);
+    return !mbPayloadReleased;
 }
 
 bool KeyFrame::isBad()
@@ -978,6 +1097,9 @@ void KeyFrame::EraseConnection(KeyFrame* pKF)
 
 vector<size_t> KeyFrame::GetFeaturesInArea(const float &x, const float &y, const float &r, const bool bRight) const
 {
+    // Task P3d: GetFeaturesInArea reads mGrid + mvKeysUnData directly (both spilled/dropped on
+    // eviction), so it is a fault-in point too -- restore the payload and rebuild the grid first.
+    EnsureResident();
     if (MemoryGovernor::ParanoiaEnabled() && mbPayloadReleased)
     {
         AbortOnReleasedPayloadRead(mnId, "GetFeaturesInArea");
