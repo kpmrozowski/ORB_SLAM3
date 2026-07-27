@@ -4677,6 +4677,15 @@ void Tracking::UpdateLocalPoints()
 
 void Tracking::UpdateLocalKeyFrames()
 {
+    // Task P6 (use-after-free fix): when culled MapPoints are actually delete()d
+    // (ORB_MEM_DELETE_QUARANTINE>0), a bad/shell keyframe must never enter mvpLocalKeyFrames -- its
+    // mvpMapPoints slots were never severed and can point at a freed MapPoint that
+    // UpdateLocalPoints() would then dereference (Tracking.cc:4665 reads the slot before its
+    // isBad() guard). The neighbour/child pushes below are already isBad()-guarded; the parent and
+    // IMU-temporal pushes are not, so guard them too under the same condition. Gated on the knob so
+    // OFF mode is byte-identical to stock (shells are harmless when nothing is ever freed).
+    const bool quarantine_active = MemoryGovernor::DeleteQuarantineActive();
+
     // Each map point vote for the keyframes in which it has been observed
     map<KeyFrame*,int,IdLess> keyframeCounter;
     if(!mpAtlas->isImuInitialized() || (mCurrentFrame.mnId<mnLastRelocFrameId+2))
@@ -4791,7 +4800,7 @@ void Tracking::UpdateLocalKeyFrames()
         }
 
         KeyFrame* pParent = pKF->GetParent();
-        if(pParent)
+        if(pParent && !(quarantine_active && pParent->isBad()))
         {
             if(pParent->mnTrackReferenceForFrame!=mCurrentFrame.mnId)
             {
@@ -4813,7 +4822,10 @@ void Tracking::UpdateLocalKeyFrames()
                 break;
             if(tempKeyFrame->mnTrackReferenceForFrame!=mCurrentFrame.mnId)
             {
-                mvpLocalKeyFrames.push_back(tempKeyFrame);
+                if(!(quarantine_active && tempKeyFrame->isBad()))
+                {
+                    mvpLocalKeyFrames.push_back(tempKeyFrame);
+                }
                 tempKeyFrame->mnTrackReferenceForFrame=mCurrentFrame.mnId;
                 tempKeyFrame=tempKeyFrame->mPrevKF;
             }

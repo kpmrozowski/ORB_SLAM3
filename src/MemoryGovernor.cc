@@ -523,26 +523,89 @@ void MemoryGovernor::DrainExpiredDeletes()
         // KeyFrame::nNextId went backwards => a full Tracking::Reset() cleared the Atlas and
         // restarted the id counter. Every queued MapPoint was orphaned by that reset (the reset
         // does not delete MapPoints -- stock leaks them), and post-reset tracking state may still
-        // reference them, so drop the queue WITHOUT freeing rather than risk a use-after-free.
-        // The leaked remnant is bounded by the last <K keyframes' worth of culls -- stock leaks
-        // all of them anyway. Resetting the MapPoints' mbDeleteQueued guards is unnecessary: those
-        // objects are detached and will never be baddened (hence re-enqueued) again.
+        // reference them, so drop the queue AND the pending-scan batch WITHOUT freeing rather than
+        // risk a use-after-free. The leaked remnant is bounded by the last <K keyframes' worth of
+        // culls -- stock leaks all of them anyway. Resetting the MapPoints' mbDeleteQueued guards
+        // is unnecessary: those objects are detached and will never be baddened (re-enqueued) again.
         mDeleteQueue.clear();
+        mPendingDeleteScan.clear();
         mLastKeyFrameNextIdSeen = keyframes_now;
         return;
     }
     mLastKeyFrameNextIdSeen = keyframes_now;
 
-    static const long quarantine_keyframes = static_cast<long>(MemEnvInt("ORB_MEM_DELETE_QUARANTINE", 0));
+    // Move every quarantine-expired MapPoint out of the FIFO into the pending-scan batch. It is NOT
+    // freed here: SeverAndDeleteBatch() must first null every live-keyframe slot still pointing at
+    // it (the two-prong root cause -- see MemoryGovernor.h). The queue is FIFO-ordered by baddening
+    // keyframe id, so this pops purely from the front.
+    static const long quarantine_keyframes =
+        static_cast<long>(MemEnvInt("ORB_MEM_DELETE_QUARANTINE", 0));
     while (!mDeleteQueue.empty()
            && keyframes_now - mDeleteQueue.front().second >= quarantine_keyframes)
     {
-        MapPoint* const expired_map_point = mDeleteQueue.front().first;
+        mPendingDeleteScan.push_back(mDeleteQueue.front().first);
         mDeleteQueue.pop_front();
-        // The one sanctioned owning free: `this` MapPoint is unreferenced by any live/readable
-        // container (proof in MemoryGovernor.h) and mbDeleteQueued ensured it was enqueued once.
-        delete expired_map_point;
     }
+
+    // Amortize the O(keyframes * features) severance scan: run it (and the batch free) only once
+    // every scan_every_ticks ticks, or immediately if the batch grew past scan_batch_cap (which
+    // bounds the extra transient memory of already-culled shells held a little longer). Neither
+    // constant affects the deterministic md5 -- the scan only nulls stale slots and frees memory,
+    // both trajectory-invariant post-P0.5 -- so they are free tuning parameters (env-overridable
+    // for measurement, sensible defaults otherwise).
+    static const long scan_every_ticks =
+        std::max(1L, static_cast<long>(MemEnvInt("ORB_MEM_DELETE_SCAN_EVERY", 20)));
+    static const std::size_t scan_batch_cap =
+        static_cast<std::size_t>(std::max(1, MemEnvInt("ORB_MEM_DELETE_SCAN_CAP", 8192)));
+    ++mDeleteScanTick;
+    const bool period_elapsed = (mDeleteScanTick % scan_every_ticks == 0);
+    const bool batch_full = mPendingDeleteScan.size() >= scan_batch_cap;
+    if (!mPendingDeleteScan.empty() && (period_elapsed || batch_full))
+    {
+        SeverAndDeleteBatch();
+    }
+}
+
+void MemoryGovernor::SeverAndDeleteBatch()
+{
+    // Build the O(1)-membership doomed set from the batch (reused scratch; capacity retained).
+    mDoomedScratch.clear();
+    for (MapPoint* const doomed_map_point : mPendingDeleteScan)
+    {
+        mDoomedScratch.insert(doomed_map_point);
+    }
+
+    // Prong 1: null every live-keyframe mvpMapPoints slot still pointing at a batched MapPoint,
+    // across every map in the atlas, BEFORE any free. GetAllKeyFrames() returns only live KFs
+    // (SetBadFlag unlinks a bad KF from Map::mspKeyFrames), so this reaches exactly the live-and-
+    // readable slots; shell-KF slots are kept out of the read path by Tracking's isBad() guards.
+    if (mpAtlas != nullptr)
+    {
+        for (Map* const current_map : mpAtlas->GetAllMaps())
+        {
+            if (current_map == nullptr)
+            {
+                continue;
+            }
+            for (KeyFrame* const key_frame : current_map->GetAllKeyFrames())
+            {
+                if (key_frame != nullptr)
+                {
+                    key_frame->NullMapPointSlotsIn(mDoomedScratch);
+                }
+            }
+        }
+    }
+
+    // The sanctioned owning free: no live/readable container references any of these MapPoints now
+    // (Map::mspMapPoints erased at baddening, every live-KF slot nulled above, shell slots
+    // unreadable, Frame/mpReplaced/mlpRecentAddedMapPoints readers cycled out over the quarantine).
+    // mbDeleteQueued guaranteed each was enqueued -- hence delete()d -- exactly once.
+    for (MapPoint* const doomed_map_point : mPendingDeleteScan)
+    {
+        delete doomed_map_point;
+    }
+    mPendingDeleteScan.clear();
 }
 
 bool MemoryGovernor::ReclaimBadPayloadEnabled()

@@ -100,6 +100,7 @@
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -245,13 +246,28 @@ private:
     void EnsureSpillWorker();
     void EvictionSweep();
 
-    // Task P6 — delete MapPoints whose K-keyframe quarantine has expired. Called from Tick()
-    // (deterministic main thread, after the LocalMapping/LoopClosing spins). Pops the FIFO
-    // mDeleteQueue from the front while the head's baddening keyframe id is >= K keyframes behind
-    // KeyFrame::nNextId, delete()ing each. Detects a full Tracking::Reset (KeyFrame::nNextId went
-    // backwards, atlas cleared) and drops the queue without freeing (those MapPoints are orphaned
-    // by the reset; leaking the last <K keyframes' worth matches stock and avoids a post-reset UAF).
+    // Task P6 — move MapPoints whose K-keyframe quarantine has expired out of the FIFO
+    // mDeleteQueue into the pending-scan batch, then (amortized: once every
+    // ORB_MEM_DELETE_SCAN_EVERY ticks, or immediately once the batch exceeds
+    // ORB_MEM_DELETE_SCAN_CAP) run the slot-severance scan + batch free via
+    // SeverAndDeleteBatch(). Called from Tick() (deterministic main thread, after the
+    // LocalMapping/LoopClosing spins). Detects a full Tracking::Reset (KeyFrame::nNextId went
+    // backwards, atlas cleared) and drops both the queue and the batch without freeing (those
+    // MapPoints are orphaned by the reset; leaking the last <K keyframes' worth matches stock and
+    // avoids a post-reset UAF).
     void DrainExpiredDeletes();
+
+    // Task P6 (use-after-free fix) — the sanctioned batch free. BEFORE delete()ing the batch, scan
+    // every live keyframe (all maps in the atlas; GetAllKeyFrames() excludes bad/shell KFs) and
+    // null any mvpMapPoints slot still pointing at a batched MapPoint. ORB-SLAM3 deliberately keeps
+    // mvpMapPoints slots desynchronized from MapPoint::mObservations, so SetBadFlag()/Replace()
+    // severance (which walks mObservations) can leave a stale live-keyframe slot dangling; this
+    // pass removes it, guaranteeing no live-and-readable container holds the pointer at free time.
+    // Shell-keyframe slots are made unreadable instead by the isBad() guards in
+    // Tracking::UpdateLocalKeyFrames() (shells are excluded from GetAllKeyFrames()). Amortized: the
+    // O(keyframes * features) scan runs once per batch (see DrainExpiredDeletes()), not per tick,
+    // with O(1) membership via mDoomedScratch — negligible per-frame CPU.
+    void SeverAndDeleteBatch();
 
     Atlas* mpAtlas = nullptr;
     std::atomic<long> mKfShellReleased{0};
@@ -282,6 +298,18 @@ private:
     std::deque<std::pair<MapPoint*, long>> mDeleteQueue;
     // Last KeyFrame::nNextId observed by DrainExpiredDeletes(); a decrease flags a full reset.
     long mLastKeyFrameNextIdSeen = 0;
+
+    // Task P6 (use-after-free fix) — amortized slot-severance batch. Quarantine-expired MapPoints
+    // are moved here from mDeleteQueue but NOT freed until SeverAndDeleteBatch() has nulled every
+    // live-keyframe slot pointing at them; the batch is flushed once per kScanEveryTicks ticks (or
+    // sooner if it exceeds kScanBatchCap), amortizing the atlas scan so per-tick CPU stays
+    // negligible. A quarantine-expired MapPoint held here for the extra <kScanEveryTicks ticks is
+    // simply quarantined a little longer -- strictly safer, and md5-neutral (the trajectory is
+    // allocation-invariant post-P0.5, and nulling a stale slot equals stock's lazy null-on-read).
+    // mDoomedScratch is the reused O(1)-membership set (capacity retained across flushes).
+    std::vector<MapPoint*> mPendingDeleteScan;
+    std::unordered_set<MapPoint*> mDoomedScratch;
+    long mDeleteScanTick = 0;
 };
 
 }  // namespace ORB_SLAM3

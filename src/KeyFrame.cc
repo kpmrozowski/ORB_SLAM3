@@ -463,6 +463,19 @@ void KeyFrame::ReplaceMapPointMatch(const int &idx, MapPoint* pMP)
     mvpMapPoints[idx]=pMP;
 }
 
+void KeyFrame::NullMapPointSlotsIn(const std::unordered_set<MapPoint*>& doomed)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    for(size_t slot_index=0, slot_end=mvpMapPoints.size(); slot_index<slot_end; ++slot_index)
+    {
+        MapPoint* const slot_map_point = mvpMapPoints[slot_index];
+        if(slot_map_point!=nullptr && doomed.find(slot_map_point)!=doomed.end())
+        {
+            mvpMapPoints[slot_index]=static_cast<MapPoint*>(NULL);
+        }
+    }
+}
+
 set<MapPoint*, IdLess> KeyFrame::GetMapPoints()
 {
     unique_lock<mutex> lock(mMutexFeatures);

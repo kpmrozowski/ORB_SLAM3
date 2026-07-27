@@ -38,6 +38,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <unordered_set>
 
 #include <boost/serialization/base_object.hpp>
 #include <boost/serialization/vector.hpp>
@@ -274,6 +275,16 @@ public:
     void EraseMapPointMatch(const int &idx);
     void EraseMapPointMatch(MapPoint* pMP);
     void ReplaceMapPointMatch(const int &idx, MapPoint* pMP);
+
+    // Task P6 (use-after-free fix): null every mvpMapPoints slot that still points at a MapPoint
+    // contained in `doomed`. Called from MemoryGovernor::DrainExpiredDeletes() immediately before
+    // those culled MapPoints are delete()d, so no live-keyframe slot can dangle across the free.
+    // ORB-SLAM3 deliberately lets mvpMapPoints slots desync from MapPoint::mObservations (see the
+    // comment in ReleaseBadPayload()), so SetBadFlag()/Replace() severance via mObservations can
+    // miss a stale slot; this defensive pass removes any such residual slot. One O(features) sweep
+    // under mMutexFeatures with O(1) set membership.
+    void NullMapPointSlotsIn(const std::unordered_set<MapPoint*>& doomed);
+
     std::set<MapPoint*, IdLess> GetMapPoints();
     std::vector<MapPoint*> GetMapPointMatches();
     int TrackedMapPoints(const int &minObs);
