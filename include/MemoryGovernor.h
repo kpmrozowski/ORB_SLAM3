@@ -98,7 +98,9 @@
 #define MEMORYGOVERNOR_H
 
 #include <atomic>
+#include <deque>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace ORB_SLAM3
@@ -146,6 +148,38 @@ public:
     // them right after SetBadFlag(), which is what made the deferred KeyFrame queue a
     // use-after-free.)
     void DeferMapPointRelease(MapPoint* const map_point);
+
+    // Task P6 — quarantine delete of culled MapPoints (ORB_MEM_DELETE_QUARANTINE=K KF-ticks).
+    //
+    // Enqueue a MapPoint whose SetBadFlag()/Replace() just completed (so it is unlinked from the
+    // Map and every observer KeyFrame slot) for actual delete() after a K-keyframe quarantine.
+    // Only ever called (and only meaningful) when DeleteQuarantineActive(); deterministic
+    // single-thread only, so the queue needs no locking. MapPoint::mbDeleteQueued guarantees each
+    // MapPoint is enqueued at most once, so it is delete()d at most once (the single sanctioned
+    // owning free). The pointer/container coverage proof for why the quarantine makes this
+    // use-after-free-safe is in task-P6-report.md; the short version:
+    //   * Map::mspMapPoints           -- erased synchronously in SetBadFlag()/Replace().
+    //   * live KeyFrame mvpMapPoints  -- every slot nulled synchronously via EraseMapPointMatch()
+    //                                    over the (complete-for-live-holders) mObservations set.
+    //   * bad/shell KeyFrame slots    -- never dereferenced (bad KFs are unlinked from the Map,
+    //                                    the KeyFrameDatabase and the covisibility graph, so no
+    //                                    reader iterates their mvpMapPoints).
+    //   * Frame::mvpMapPoints (last/current) + MapPoint::mpReplaced chain (CheckReplacedInLastFrame)
+    //                                 -- transient, cleared within ~1-2 frames << K keyframes.
+    //   * LocalMapping::mlpRecentAddedMapPoints -- a bad MapPoint is erased on the next
+    //                                    MapPointCulling pass, i.e. within <=3 keyframes; K>=5
+    //                                    covers it. This is why K is counted in KEYFRAMES.
+    //   * LoopClosing scratch vectors -- re-populated from live KFs each detection tick and
+    //                                    consumed within the same cycle.
+    void DeferMapPointDelete(MapPoint* const map_point);
+
+    // True iff ORB_MEM_DELETE_QUARANTINE>0 AND ORB_DETERMINISTIC is active. Gates the
+    // SetBadFlag()/Replace() enqueues and the delete pass in Tick(). Requesting it without
+    // deterministic mode prints exactly one warning and stays inert (the quarantine's
+    // use-after-free safety proof relies on the single-threaded deterministic tick point; frees
+    // in threaded mode could race stale readers). K=0/unset => fully inert = stock leak behaviour.
+    // Callable from any thread/file; caches its result in function-local statics like the peers.
+    static bool DeleteQuarantineActive();
 
     // Current resident set size in KB, read from /proc/self/status VmRSS. 0 if unavailable.
     static long ReadVmRssKb();
@@ -211,6 +245,14 @@ private:
     void EnsureSpillWorker();
     void EvictionSweep();
 
+    // Task P6 — delete MapPoints whose K-keyframe quarantine has expired. Called from Tick()
+    // (deterministic main thread, after the LocalMapping/LoopClosing spins). Pops the FIFO
+    // mDeleteQueue from the front while the head's baddening keyframe id is >= K keyframes behind
+    // KeyFrame::nNextId, delete()ing each. Detects a full Tracking::Reset (KeyFrame::nNextId went
+    // backwards, atlas cleared) and drops the queue without freeing (those MapPoints are orphaned
+    // by the reset; leaking the last <K keyframes' worth matches stock and avoids a post-reset UAF).
+    void DrainExpiredDeletes();
+
     Atlas* mpAtlas = nullptr;
     std::atomic<long> mKfShellReleased{0};
 
@@ -228,6 +270,18 @@ private:
     // inline from KeyFrame::SetBadFlag().
     std::vector<MapPoint*> mPendingMapPointRelease;
     std::vector<MapPoint*> mReadyMapPointRelease;
+
+    // Task P6 quarantine delete queue. Each entry is (culled MapPoint, KeyFrame::nNextId at the
+    // moment it was baddened). Entries are appended in baddening order, and KeyFrame::nNextId is
+    // monotonic within a reset epoch, so the queue is intrinsically FIFO-ordered by that id ->
+    // DrainExpiredDeletes() only ever pops from the front. Touched exclusively on the single
+    // deterministic thread (enqueue from SetBadFlag()/Replace() during the spins, drain from
+    // Tick()), so it is lock-free by construction. std::deque node churn is bounded (only the
+    // last K keyframes' worth of culled MapPoints are ever resident) and, post-P0.5, allocation
+    // is trajectory-invariant, so this does not perturb the deterministic md5.
+    std::deque<std::pair<MapPoint*, long>> mDeleteQueue;
+    // Last KeyFrame::nNextId observed by DrainExpiredDeletes(); a decrease flags a full reset.
+    long mLastKeyFrameNextIdSeen = 0;
 };
 
 }  // namespace ORB_SLAM3

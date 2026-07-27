@@ -257,6 +257,14 @@ protected:
      // track-scratch initializer pattern above.
      bool mbDescriptorReleased = false;
 
+     // Task P6: true once this MapPoint has been enqueued into MemoryGovernor's quarantine
+     // delete queue (from SetBadFlag()/Replace(), only when ORB_MEM_DELETE_QUARANTINE>0). A
+     // strict once-only guard so a MapPoint that is baddened more than once (SetBadFlag twice,
+     // or Replace() then SetBadFlag()) is enqueued -- and therefore delete()d -- exactly once.
+     // Deterministic single-thread only (the quarantine is deterministic-mode-gated), so no
+     // synchronization is needed. NSDMI, matching mbDescriptorReleased above.
+     bool mbDeleteQueued = false;
+
      // Reference KeyFrame
      KeyFrame* mpRefKF;
      long unsigned int mBackupRefKFId;

@@ -254,6 +254,20 @@ void MapPoint::SetBadFlag()
     {
         MemoryGovernor::Instance().DeferMapPointRelease(this);
     }
+
+    // Task P6 (memory reduction): quarantine-delete this now-bad MapPoint. Every observer's
+    // mvpMapPoints slot was nulled above (EraseMapPointMatch over the complete mObservations set)
+    // and it has been erased from the Map, so after a K-KF-tick quarantine -- long enough for the
+    // last/current Frame's mvpMapPoints and the mpReplaced chain read by
+    // Tracking::CheckReplacedInLastFrame, and LocalMapping::mlpRecentAddedMapPoints, to have
+    // cycled it out -- MemoryGovernor::Tick() delete()s it (see MemoryGovernor.h for the full
+    // pointer/container coverage proof). mbDeleteQueued makes this strictly once-only. Fully
+    // inert (a single static-bool check) unless ORB_MEM_DELETE_QUARANTINE>0 in deterministic mode.
+    if (!mbDeleteQueued && MemoryGovernor::DeleteQuarantineActive())
+    {
+        mbDeleteQueued = true;
+        MemoryGovernor::Instance().DeferMapPointDelete(this);
+    }
 }
 
 void MapPoint::ReleaseBadDescriptor()
@@ -329,6 +343,19 @@ void MapPoint::Replace(MapPoint* pMP)
     pMP->ComputeDistinctiveDescriptors();
 
     mpMap->EraseMapPoint(this);
+
+    // Task P6 (memory reduction): Replace() is the second path that baddens a MapPoint (mbBad set
+    // above), leaking `this` exactly like SetBadFlag() does. Quarantine-delete it too. `this`
+    // keeps mpReplaced=pMP so Tracking::CheckReplacedInLastFrame can still resolve a last-Frame
+    // slot for one more frame; the K-KF-tick quarantine outlives that read, and the deletion order
+    // is FIFO by baddening time, so `this` (enqueued now) is always delete()d strictly before its
+    // still-live replacement pMP is ever enqueued -- no dangling mpReplaced is ever read. See
+    // MemoryGovernor.h. Once-only via mbDeleteQueued; inert unless ORB_MEM_DELETE_QUARANTINE>0.
+    if (!mbDeleteQueued && MemoryGovernor::DeleteQuarantineActive())
+    {
+        mbDeleteQueued = true;
+        MemoryGovernor::Instance().DeferMapPointDelete(this);
+    }
 }
 
 bool MapPoint::isBad()

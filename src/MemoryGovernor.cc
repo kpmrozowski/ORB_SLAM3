@@ -71,6 +71,19 @@ bool WarnIfBudgetRequestedWithoutDeterministic(const bool budget_requested,
     return budget_requested && deterministic_mode;
 }
 
+// Task P6: same one-shot warning for the quarantine-delete knob.
+bool WarnIfQuarantineRequestedWithoutDeterministic(const bool quarantine_requested,
+                                                   const bool deterministic_mode)
+{
+    if (quarantine_requested && !deterministic_mode)
+    {
+        std::fprintf(stderr,
+                      "ORB_MEM_DELETE_QUARANTINE>0 requires ORB_DETERMINISTIC=1 (deterministic "
+                      "mode); ignoring -- culled MapPoints stay leaked.\n");
+    }
+    return quarantine_requested && deterministic_mode;
+}
+
 // Resolve the spill file path: ORB_MEM_SPILL, else <cwd>/orbmem_spill.bin.
 std::string ResolveSpillPath()
 {
@@ -330,6 +343,14 @@ void MemoryGovernor::Tick()
     {
         EvictionSweep();
     }
+
+    // Task P6 quarantine-delete pass: delete culled MapPoints whose K-keyframe quarantine has
+    // expired. Also runs at this same post-spin quiescent tick point, so no reader can race a
+    // free. Zero per-tick cost when the quarantine is unset (one static-bool check).
+    if (DeleteQuarantineActive())
+    {
+        DrainExpiredDeletes();
+    }
 }
 
 bool MemoryGovernor::SpillActive()
@@ -483,6 +504,47 @@ void MemoryGovernor::DeferMapPointRelease(MapPoint* const map_point)
     mPendingMapPointRelease.push_back(map_point);
 }
 
+void MemoryGovernor::DeferMapPointDelete(MapPoint* const map_point)
+{
+    // Stamp with the number of keyframes created so far (KeyFrame::nNextId). The quarantine in
+    // DrainExpiredDeletes() is measured against how far that count advances, i.e. in KEYFRAMES,
+    // which is the unit that bounds every multi-tick reader (mlpRecentAddedMapPoints in <=3 KFs;
+    // see the DeferMapPointDelete() coverage note in MemoryGovernor.h). Appended in baddening
+    // order -> intrinsically FIFO-sorted by this stamp (KeyFrame::nNextId never decreases within
+    // a reset epoch), so DrainExpiredDeletes() can pop purely from the front.
+    mDeleteQueue.emplace_back(map_point, static_cast<long>(KeyFrame::nNextId));
+}
+
+void MemoryGovernor::DrainExpiredDeletes()
+{
+    const long keyframes_now = static_cast<long>(KeyFrame::nNextId);
+    if (keyframes_now < mLastKeyFrameNextIdSeen)
+    {
+        // KeyFrame::nNextId went backwards => a full Tracking::Reset() cleared the Atlas and
+        // restarted the id counter. Every queued MapPoint was orphaned by that reset (the reset
+        // does not delete MapPoints -- stock leaks them), and post-reset tracking state may still
+        // reference them, so drop the queue WITHOUT freeing rather than risk a use-after-free.
+        // The leaked remnant is bounded by the last <K keyframes' worth of culls -- stock leaks
+        // all of them anyway. Resetting the MapPoints' mbDeleteQueued guards is unnecessary: those
+        // objects are detached and will never be baddened (hence re-enqueued) again.
+        mDeleteQueue.clear();
+        mLastKeyFrameNextIdSeen = keyframes_now;
+        return;
+    }
+    mLastKeyFrameNextIdSeen = keyframes_now;
+
+    static const long quarantine_keyframes = static_cast<long>(MemEnvInt("ORB_MEM_DELETE_QUARANTINE", 0));
+    while (!mDeleteQueue.empty()
+           && keyframes_now - mDeleteQueue.front().second >= quarantine_keyframes)
+    {
+        MapPoint* const expired_map_point = mDeleteQueue.front().first;
+        mDeleteQueue.pop_front();
+        // The one sanctioned owning free: `this` MapPoint is unreferenced by any live/readable
+        // container (proof in MemoryGovernor.h) and mbDeleteQueued ensured it was enqueued once.
+        delete expired_map_point;
+    }
+}
+
 bool MemoryGovernor::ReclaimBadPayloadEnabled()
 {
     static const bool deterministic_mode = MemEnvSet("ORB_DETERMINISTIC");
@@ -496,6 +558,15 @@ bool MemoryGovernor::ParanoiaEnabled()
 {
     static const bool enabled = MemEnvInt("ORB_MEM_PARANOIA", 0) != 0;
     return enabled;
+}
+
+bool MemoryGovernor::DeleteQuarantineActive()
+{
+    static const bool deterministic_mode = MemEnvSet("ORB_DETERMINISTIC");
+    static const bool quarantine_requested = MemEnvInt("ORB_MEM_DELETE_QUARANTINE", 0) > 0;
+    static const bool active =
+        WarnIfQuarantineRequestedWithoutDeterministic(quarantine_requested, deterministic_mode);
+    return active;
 }
 
 void MemoryGovernor::ConfigureAllocatorIfEnabled()
