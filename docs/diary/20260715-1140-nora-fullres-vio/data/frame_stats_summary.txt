@@ -1,0 +1,6 @@
+run                                                            frames feat_mean feat_med match_mean match_med   %<30
+nora538_move/mono/native1640                                     4197      2698     2502        415       521   10.1
+nora538_move/mono_inertial/native1640                            4730      3643     2694         72        46    5.1
+nora538_move/mono_inertial/native1640_measimu                    4168      3472     2773         41        13   89.8
+nora542_move/mono/native1640                                      874      3999     2507        263       278   21.3
+nora542_move/mono_inertial/native1640_measimu                     302      8411    11012         63         2   65.8
